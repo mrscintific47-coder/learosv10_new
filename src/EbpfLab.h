@@ -91,7 +91,11 @@ private:
 
     bool openPerfCounters();
     void closePerfCounters();
-    bool enableFtrace(const QString& probe);
+    // Returns empty string on success, or a human-readable reason on failure —
+    // debugfs-not-mounted, permission-denied, and tracing_on-failed are all
+    // different problems with different fixes, so they must not be collapsed
+    // into one generic "mount debugfs" message.
+    QString enableFtrace(const QString& probe);
     void disableFtrace();
     void readCounters();
     void refreshCounterTable();

@@ -286,12 +286,21 @@ void EbpfLab::closePerfCounters() {
 
 void EbpfLab::onStartPerfCounters() {
     if (!openPerfCounters()) {
-        statusLabel->setText("⚠ Could not open perf events. Try: sudo setcap cap_perfmon+ep build/LearnOS");
-        emit explanationNeeded(
+        QString paranoid = "unknown";
+        std::ifstream pf("/proc/sys/kernel/perf_event_paranoid");
+        if (pf) { std::string v; pf >> v; paranoid = QString::fromStdString(v); }
+
+        statusLabel->setText(QString("⚠ Could not open perf events (perf_event_paranoid=%1). "
+            "Try: sudo setcap cap_perfmon+ep build/LearnOS").arg(paranoid));
+        emit explanationNeeded(QString(
             "<b>perf_event_open() failed</b><br><br>"
-            "Hardware counters require <code>CAP_PERFMON</code> or running as root. "
-            "Run: <code>sudo setcap cap_perfmon+ep build/LearnOS</code><br><br>"
-            "Software counters (context switches, page faults) may still work.");
+            "Current <code>/proc/sys/kernel/perf_event_paranoid</code> = <b>%1</b>. "
+            "This lab requests system-wide counters (pid=-1), which most distros "
+            "block above paranoid level 1.<br><br>"
+            "Two fixes, either works:<br>"
+            "• <code>sudo setcap cap_perfmon+ep build/LearnOS</code> — grant just this binary the capability<br>"
+            "• <code>sudo sysctl kernel.perf_event_paranoid=1</code> — loosen system-wide (resets on reboot)"
+            ).arg(paranoid));
         return;
     }
     startPerfBtn->setEnabled(false);
@@ -360,8 +369,8 @@ void EbpfLab::refreshCounterTable() {
 
 // ── Ftrace ────────────────────────────────────────────────────────────────────
 
-bool EbpfLab::enableFtrace(const QString& probe) {
-    // Write to tracefs
+QString EbpfLab::enableFtrace(const QString& probe) {
+    // Find tracefs
     static const QStringList tracefsRoots = {
         "/sys/kernel/debug/tracing",
         "/sys/kernel/tracing"
@@ -370,32 +379,75 @@ bool EbpfLab::enableFtrace(const QString& probe) {
     for (auto& r : tracefsRoots) {
         if (QFileInfo::exists(r + "/trace_pipe")) { tracefsRoot = r; break; }
     }
-    if (tracefsRoot.isEmpty()) return false;
+    if (tracefsRoot.isEmpty()) {
+        return "debugfs/tracefs isn't mounted. Run: "
+               "sudo mount -t debugfs none /sys/kernel/debug";
+    }
 
-    // Map probe selection to event filter
+    // Map probe selection to event filter.
+    // IMPORTANT: /sys/kernel/tracing/set_event expects "subsystem:event"
+    // (colon) — NOT "subsystem/event" (slash). The slash form is only used
+    // for filesystem paths under events/<subsystem>/<event>/. Writing the
+    // wrong separator here made the kernel silently reject every write,
+    // leaving set_event empty with no error surfaced anywhere.
     static const char* events[] = {
-        "sched/sched_switch",
-        "syscalls/sys_enter_read",
-        "syscalls/sys_enter_write",
-        "syscalls/sys_enter_mmap",
-        "kmem/kmalloc",
+        "sched:sched_switch",
+        "syscalls:sys_enter_read",
+        "syscalls:sys_enter_write",
+        "syscalls:sys_enter_mmap",
+        "kmem:kmalloc",
     };
 
-    // Enable tracing
+    // Enable tracing — if this silently fails, tracing_on stays 0 and no
+    // events will ever appear even though everything else "succeeds".
     QFile tracingOn(tracefsRoot + "/tracing_on");
-    if (tracingOn.open(QIODevice::WriteOnly)) { tracingOn.write("1"); tracingOn.close(); }
+    if (!tracingOn.open(QIODevice::WriteOnly)) {
+        return QString("found %1 but can't write tracing_on (permission denied). "
+                        "This process needs root or CAP_SYS_ADMIN — try running "
+                        "with sudo, or: sudo setcap cap_sys_admin+ep build/LearnOS")
+                        .arg(tracefsRoot);
+    }
+    tracingOn.write("1"); tracingOn.close();
 
     QFile setEvent(tracefsRoot + "/set_event");
-    if (!setEvent.open(QIODevice::WriteOnly)) return false;
+    if (!setEvent.open(QIODevice::WriteOnly)) {
+        return QString("found %1 but can't write set_event (permission denied). "
+                        "Same fix as above — needs root or CAP_SYS_ADMIN.")
+                        .arg(tracefsRoot);
+    }
 
     int idx = probeBox->currentIndex();
     const char* ev = (idx >= 0 && idx < 5) ? events[idx] : events[0];
-    setEvent.write(ev); setEvent.close();
+    qint64 written = setEvent.write(ev);
+    setEvent.close();
+    if (written <= 0) {
+        return QString("wrote '%1' to set_event but the kernel rejected it (0 bytes accepted). "
+                        "The event name/syntax may not exist on this kernel version.")
+                        .arg(ev);
+    }
+
+    // Verify the write actually stuck — set_event can silently accept-but-drop
+    // an event name the kernel doesn't recognize, so read it back rather than
+    // trusting a non-zero write() return alone.
+    QFile verifyEvent(tracefsRoot + "/set_event");
+    if (verifyEvent.open(QIODevice::ReadOnly)) {
+        QByteArray current = verifyEvent.readAll().trimmed();
+        verifyEvent.close();
+        if (current.isEmpty()) {
+            return QString("wrote '%1' to set_event but it reads back empty — "
+                            "the kernel didn't actually enable it. This event may "
+                            "not exist on your kernel build.").arg(ev);
+        }
+    }
 
     // Open trace_pipe for non-blocking reads
     tracePipeFd = open((tracefsRoot + "/trace_pipe").toLocal8Bit().constData(),
                        O_RDONLY | O_NONBLOCK);
-    if (tracePipeFd < 0) return false;
+    if (tracePipeFd < 0) {
+        return QString("set_event succeeded but trace_pipe won't open (errno %1: %2). "
+                        "Needs root or CAP_SYS_ADMIN to read it.")
+                        .arg(errno).arg(strerror(errno));
+    }
 
     // Use QTimer to poll (pipe doesn't work well with QSocketNotifier on all kernels)
     auto* pollTimer = new QTimer(this);
@@ -403,7 +455,7 @@ bool EbpfLab::enableFtrace(const QString& probe) {
     pollTimer->start(200);
     traceNotifier = (QSocketNotifier*)pollTimer; // store ref for cleanup
 
-    return true;
+    return QString(); // success
 }
 
 void EbpfLab::disableFtrace() {
@@ -427,13 +479,15 @@ void EbpfLab::disableFtrace() {
 }
 
 void EbpfLab::onStartFtrace() {
-    if (!enableFtrace(probeBox->currentText())) {
-        statusLabel->setText("⚠ ftrace unavailable. Mount debugfs: sudo mount -t debugfs none /sys/kernel/debug");
-        emit explanationNeeded(
-            "<b>ftrace requires debugfs</b><br><br>"
-            "Mount with: <code>sudo mount -t debugfs none /sys/kernel/debug</code><br><br>"
-            "On Kali this is usually already mounted. If not, it needs root. "
-            "Also needs <code>CAP_SYS_ADMIN</code>.");
+    QString err = enableFtrace(probeBox->currentText());
+    if (!err.isEmpty()) {
+        statusLabel->setText("⚠ ftrace failed: " + err);
+        emit explanationNeeded(QString(
+            "<b>ftrace couldn't start</b><br><br>"
+            "%1<br><br>"
+            "This is a permission problem, not a missing feature — the kernel "
+            "infrastructure is there, the process just isn't allowed to use it "
+            "yet.").arg(err));
         return;
     }
     ftraceActive = true;

@@ -31,6 +31,14 @@ struct IPCChannel {
     int         serverFd    = -1;
     int         clientFd    = -1;
     std::string socketPath;
+
+    // Message framing: every Send prefixes the payload with a 4-byte length
+    // header so discrete Sends stay discrete on Read, even though the
+    // underlying pipe/socket is just a raw byte stream. rawRecvBuffer holds
+    // whatever undecoded bytes have been pulled off the fd so far; Read()
+    // peels off at most ONE complete frame per click and leaves the rest
+    // buffered for the next click.
+    std::string rawRecvBuffer;
 };
 
 class IPCFlowView : public QWidget {

@@ -16,6 +16,52 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <arpa/inet.h>
+
+// ── Message framing ─────────────────────────────────────────────────────
+// Pipes and stream sockets are raw byte streams with no built-in message
+// boundaries — that's real Unix behaviour, not a bug. To let students see
+// discrete Sends arrive as discrete Reads (e.g. "hi", "shubh", "hiii" read
+// back one at a time instead of "hishubhhiii"), every Send prefixes its
+// payload with a 4-byte length header, and Read peels off exactly ONE
+// complete frame per click, buffering any leftover bytes for next time.
+namespace {
+
+ssize_t writeFramed(int fd, const QByteArray& payload) {
+    uint32_t len = htonl((uint32_t)payload.size());
+    QByteArray frame;
+    frame.append(reinterpret_cast<const char*>(&len), sizeof(len));
+    frame.append(payload);
+    ssize_t n = write(fd, frame.constData(), frame.size());
+    if (n < (ssize_t)sizeof(len)) return -1;
+    return (ssize_t)payload.size();
+}
+
+// Tops up rawBuf with whatever is currently available on fd (fd must be
+// non-blocking), then tries to peel exactly one complete frame off the
+// front. Leftover bytes (start of next frame, or a partial frame) stay in
+// rawBuf for the next call. sawEof is set if the peer has closed its end.
+bool tryReadOneFrame(int fd, std::string& rawBuf, QByteArray& outPayload, bool& sawEof) {
+    sawEof = false;
+    char chunk[4096];
+    ssize_t n;
+    while ((n = read(fd, chunk, sizeof(chunk))) > 0) {
+        rawBuf.append(chunk, (size_t)n);
+    }
+    if (n == 0) sawEof = true;
+
+    if (rawBuf.size() < sizeof(uint32_t)) return false;
+    uint32_t len;
+    memcpy(&len, rawBuf.data(), sizeof(len));
+    len = ntohl(len);
+    if (rawBuf.size() < sizeof(uint32_t) + len) return false;
+
+    outPayload = QByteArray(rawBuf.data() + sizeof(uint32_t), (int)len);
+    rawBuf.erase(0, sizeof(uint32_t) + len);
+    return true;
+}
+
+} // namespace
 
 // ── IPCFlowView ──────────────────────────────────────────────────────────
 
@@ -364,8 +410,10 @@ void IPCLab::createPipe() {
         "• Kernel-buffered — up to 64KB before blocking<br>"
         "• Anonymous — only related processes can share it<br>"
         "• Closes when both ends are closed<br><br>"
-        "Click <b>Send</b> to write data through the pipe. "
-        "Click <b>Read</b> to read what's accumulated."
+        "<b>Note:</b> a pipe is a raw byte stream with no message boundaries — "
+        "this lab adds a small length-prefix framing on top so each "
+        "<b>Send</b> becomes exactly one <b>Read</b>, even if you send "
+        "several times before reading."
     ).arg(sender).arg(receiver));
 
     dataLog->append(QString("[PIPE] Created: fds[%1,%2]  sender=%3  receiver=%4")
@@ -615,10 +663,10 @@ void IPCLab::sendData() {
     QByteArray bytes = data.toUtf8();
 
     if (ch.type == IPCChannel::Pipe) {
-        ssize_t n = write(ch.pipeFds[1], bytes.constData(), bytes.size());
-        if (n > 0) {
+        ssize_t n = writeFramed(ch.pipeFds[1], bytes);
+        if (n >= 0) {
             ch.bytesSent += n;
-            dataLog->append(QString("[PIPE →] Wrote %1 bytes: \"%2\"").arg(n).arg(data));
+            dataLog->append(QString("[PIPE →] Sent frame (%1 bytes): \"%2\"").arg(n).arg(data));
             EventBus::get().ipcDataSent(QString::fromStdString(ch.name), n);
         } else {
             dataLog->append("[PIPE] Write failed — pipe may be full or closed");
@@ -647,21 +695,16 @@ void IPCLab::sendData() {
                 return;
             }
         }
-        ssize_t n = ::send(ch.clientFd, bytes.constData(), bytes.size(), MSG_NOSIGNAL);
-        if (n > 0) {
+        ssize_t n = writeFramed(ch.clientFd, bytes);
+        if (n >= 0) {
             ch.bytesSent += n;
-            dataLog->append(QString("[SOCK →] Sent %1 bytes: \"%2\"").arg(n).arg(data));
+            dataLog->append(QString("[SOCK →] Sent frame (%1 bytes): \"%2\"").arg(n).arg(data));
             EventBus::get().ipcDataSent(QString::fromStdString(ch.name), n);
-            // Read echo response (non-blocking peek)
-            char echoBuf[4096];
-            fcntl(ch.clientFd, F_SETFL, O_NONBLOCK);
-            ssize_t r = recv(ch.clientFd, echoBuf, sizeof(echoBuf)-1, 0);
-            fcntl(ch.clientFd, F_SETFL, 0); // restore blocking
-            if (r > 0) {
-                echoBuf[r] = '\0';
-                ch.bytesRecv += r;
-                dataLog->append(QString("[SOCK ←] Echo: \"%1\"").arg(echoBuf));
-            }
+            // NOTE: we deliberately do NOT read the echo here anymore.
+            // Send only sends — the reply sits in the kernel's socket receive
+            // buffer until the user clicks Read, same as Pipe/SharedMem below.
+            // This keeps Send/Read symmetric across all three channel types
+            // and makes bytesSent - bytesRecv (buffer occupancy) meaningful.
         } else {
             // Connection broken — reset so next Send reconnects
             ::close(ch.clientFd);
@@ -681,14 +724,15 @@ void IPCLab::readData() {
     IPCChannel& ch = channels[selectedChannel];
 
     if (ch.type == IPCChannel::Pipe) {
-        char buf[1024]; memset(buf,0,sizeof(buf));
-        ssize_t n = read(ch.pipeFds[0], buf, sizeof(buf)-1);
-        if (n > 0) {
-            ch.bytesRecv += n;   // draining: buffer = bytesSent - bytesRecv shrinks
-            buf[n] = '\0';
-            dataLog->append(QString("[PIPE ←] Read %1 bytes: \"%2\"").arg(n).arg(buf));
-        } else {
+        QByteArray payload; bool sawEof = false;
+        if (tryReadOneFrame(ch.pipeFds[0], ch.rawRecvBuffer, payload, sawEof)) {
+            ch.bytesRecv += payload.size();   // draining: buffer = bytesSent - bytesRecv shrinks
+            dataLog->append(QString("[PIPE ←] Read frame (%1 bytes): \"%2\"")
+                .arg(payload.size()).arg(QString::fromUtf8(payload)));
+        } else if (sawEof && ch.rawRecvBuffer.empty()) {
             dataLog->append("[PIPE] Nothing to read (pipe empty or closed)");
+        } else {
+            dataLog->append("[PIPE] Nothing to read yet — waiting for a full message");
         }
     } else if (ch.type == IPCChannel::SharedMem && ch.shmPtr) {
         // Read current shm content — treat it as a single "receive" of whatever
@@ -698,7 +742,26 @@ void IPCLab::readData() {
         ch.bytesRecv = ch.bytesSent;   // snapshot: received == what was last sent
         dataLog->append(QString("[SHM ←] Current content: \"%1\"").arg(content.left(80)));
     } else if (ch.type == IPCChannel::UnixSocket) {
-        dataLog->append("[SOCK] Use Send to get an echo response from the server");
+        if (ch.clientFd < 0) {
+            dataLog->append("[SOCK] Nothing to read — click Send first to open a connection");
+        } else {
+            fcntl(ch.clientFd, F_SETFL, O_NONBLOCK);
+            QByteArray payload; bool sawEof = false;
+            bool gotFrame = tryReadOneFrame(ch.clientFd, ch.rawRecvBuffer, payload, sawEof);
+            fcntl(ch.clientFd, F_SETFL, 0); // restore blocking
+
+            if (gotFrame) {
+                ch.bytesRecv += payload.size();   // draining, mirrors the Pipe branch above
+                dataLog->append(QString("[SOCK ←] Read frame (%1 bytes): \"%2\"")
+                    .arg(payload.size()).arg(QString::fromUtf8(payload)));
+            } else if (sawEof && ch.rawRecvBuffer.empty()) {
+                dataLog->append("[SOCK] Connection closed by server");
+                ::close(ch.clientFd);
+                ch.clientFd = -1;
+            } else {
+                dataLog->append("[SOCK] Nothing to read yet (echo hasn't arrived, or waiting for a full message)");
+            }
+        }
     }
 
     flowView->setChannels(channels);
