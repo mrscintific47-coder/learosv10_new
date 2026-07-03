@@ -1,0 +1,508 @@
+#include "EbpfLab.h"
+#include "Theme.h"
+#include <QHeaderView>
+#include <QPainterPath>
+#include <QFile>
+#include <QFileInfo>
+#include <QTextCursor>
+#include <fstream>
+#include <sstream>
+#include <cstring>
+#include <cerrno>
+#include <sys/ioctl.h>
+#include <sys/syscall.h>
+#include <linux/perf_event.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <algorithm>
+
+// ── PerfChart ─────────────────────────────────────────────────────────────────
+
+PerfChart::PerfChart(QWidget* p) : QWidget(p) {
+    setMinimumHeight(100);
+    setStyleSheet(QString("background:white;border-radius:10px;border:1px solid %1;").arg(Theme::BORDER));
+}
+
+void PerfChart::clear() { series.clear(); maxVal = 1; update(); }
+
+void PerfChart::addSample(const QString& name, long delta) {
+    for (auto& s : series) {
+        if (s.name == name) {
+            s.samples.append(delta);
+            if (s.samples.size() > 60) s.samples.removeFirst();
+            if (delta > maxVal) maxVal = delta;
+            update();
+            return;
+        }
+    }
+    static const QColor pal[] = {
+        QColor("#4F6EF7"),QColor("#22C55E"),QColor("#F97316"),QColor("#A855F7"),
+        QColor("#EF4444"),QColor("#14B8A6"),QColor("#EAB308"),QColor("#EC4899")
+    };
+    Series s;
+    s.name = name;
+    s.samples.append(delta);
+    s.color = pal[series.size() % 8];
+    series.append(s);
+    update();
+}
+
+void PerfChart::paintEvent(QPaintEvent*) {
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.fillRect(rect(), Qt::white);
+
+    if (series.isEmpty()) {
+        p.setPen(QColor(Theme::TEXT_MUTED));
+        p.setFont(QFont("Segoe UI",10));
+        p.drawText(rect(), Qt::AlignCenter, "Start perf counters to see data here.");
+        return;
+    }
+
+    int w = width(), h = height(), pad = 8;
+    int chartH = h - 24 - pad;
+
+    for (auto& s : series) {
+        if (s.samples.isEmpty()) continue;
+        int n = s.samples.size();
+        float xStep = (float)(w - pad*2) / std::max(n-1, 1);
+        QPainterPath path;
+        for (int i=0;i<n;i++) {
+            float x = pad + i * xStep;
+            float y = pad + chartH - (float)s.samples[i]/maxVal * chartH;
+            if (i==0) path.moveTo(x,y); else path.lineTo(x,y);
+        }
+        p.setPen(QPen(s.color, 2, Qt::SolidLine, Qt::RoundCap));
+        p.drawPath(path);
+    }
+
+    // Legend
+    int lx = pad, ly = h - 14;
+    for (auto& s : series) {
+        p.setPen(s.color);
+        p.setFont(QFont("Segoe UI",7,QFont::Bold));
+        QRect r(lx, ly, 8, 8);
+        QPainterPath rp; rp.addRoundedRect(r,2,2);
+        p.fillPath(rp, s.color);
+        p.setPen(QColor(Theme::TEXT_MUTED));
+        p.drawText(lx+10, ly+8, s.name.left(12));
+        lx += 14 + p.fontMetrics().horizontalAdvance(s.name.left(12)) + 10;
+    }
+}
+
+// ── EbpfLab ───────────────────────────────────────────────────────────────────
+
+static long perf_event_open(struct perf_event_attr* hw_event, pid_t pid,
+                             int cpu, int group_fd, unsigned long flags) {
+    return syscall(__NR_perf_event_open, hw_event, pid, cpu, group_fd, flags);
+}
+
+EbpfLab::EbpfLab(QWidget* parent) : QWidget(parent) {
+    setStyleSheet(QString("background:%1;").arg(Theme::BG_APP));
+    auto* outer = new QVBoxLayout(this);
+    outer->setContentsMargins(16,16,16,16);
+    outer->setSpacing(10);
+
+    auto* titleRow = new QHBoxLayout();
+    auto* title = new QLabel("🔬  Observability Lab — perf counters & ftrace");
+    title->setStyleSheet(QString("color:%1;font-size:14px;font-weight:bold;").arg(Theme::TEXT_PRIMARY));
+    auto* chip = new QLabel("● KERNEL INTERFACE");
+    chip->setStyleSheet(QString("color:%1;background:%2;border-radius:8px;padding:3px 10px;"
+        "font-size:10px;font-weight:bold;").arg(Theme::TEAL).arg(Theme::TEAL_LIGHT));
+    titleRow->addWidget(title); titleRow->addStretch(); titleRow->addWidget(chip);
+    outer->addLayout(titleRow);
+
+    auto* hint = new QLabel(
+        "Uses <b>perf_event_open()</b> for hardware/software counters and "
+        "<b>/sys/kernel/debug/tracing</b> for kernel function tracing. "
+        "No external tools needed — direct syscall and filesystem interfaces.");
+    hint->setWordWrap(true);
+    hint->setStyleSheet(QString("color:%1;font-size:11px;").arg(Theme::TEXT_SECONDARY));
+    outer->addWidget(hint);
+
+    // Top row: perf + ftrace controls side by side
+    auto* topRow = new QHBoxLayout(); topRow->setSpacing(10);
+
+    // Perf counters card
+    auto* perfCard = new QWidget(); perfCard->setStyleSheet(Theme::card());
+    auto* perfL = new QVBoxLayout(perfCard); perfL->setContentsMargins(12,10,12,10);
+    auto* perfTitle = new QLabel("Hardware & Software Counters");
+    perfTitle->setStyleSheet(QString("color:%1;font-size:12px;font-weight:bold;").arg(Theme::TEXT_PRIMARY));
+    perfL->addWidget(perfTitle);
+
+    auto* perfHint = new QLabel("Reads CPU instruction counts, cache misses, context switches, and page faults via <b>perf_event_open()</b> syscall. System-wide (pid=-1).");
+    perfHint->setWordWrap(true);
+    perfHint->setStyleSheet(QString("color:%1;font-size:10px;").arg(Theme::TEXT_SECONDARY));
+    perfL->addWidget(perfHint);
+
+    auto* perfBtnRow = new QHBoxLayout();
+    startPerfBtn = new QPushButton("▶ Start Counters");
+    startPerfBtn->setStyleSheet(Theme::btnPrimary());
+    stopPerfBtn = new QPushButton("■ Stop");
+    stopPerfBtn->setStyleSheet(Theme::btnDanger());
+    stopPerfBtn->setEnabled(false);
+    perfBtnRow->addWidget(startPerfBtn); perfBtnRow->addWidget(stopPerfBtn);
+    perfL->addLayout(perfBtnRow);
+    topRow->addWidget(perfCard);
+
+    // Ftrace card
+    auto* ftraceCard = new QWidget(); ftraceCard->setStyleSheet(Theme::card());
+    auto* ftraceL = new QVBoxLayout(ftraceCard); ftraceL->setContentsMargins(12,10,12,10);
+    auto* ftraceTitle = new QLabel("Kernel Function Tracer (ftrace)");
+    ftraceTitle->setStyleSheet(QString("color:%1;font-size:12px;font-weight:bold;").arg(Theme::TEXT_PRIMARY));
+    ftraceL->addWidget(ftraceTitle);
+
+    probeBox = new QComboBox();
+    probeBox->addItem("sched_switch — every context switch");
+    probeBox->addItem("sys_enter_read — every read() syscall");
+    probeBox->addItem("sys_enter_write — every write() syscall");
+    probeBox->addItem("sys_enter_mmap — every mmap() syscall");
+    probeBox->addItem("kmalloc — every kernel malloc");
+    probeBox->setStyleSheet(Theme::input());
+    ftraceL->addWidget(probeBox);
+
+    auto* ftraceBtnRow = new QHBoxLayout();
+    startFtraceBtn = new QPushButton("▶ Start Trace");
+    startFtraceBtn->setStyleSheet(Theme::btnSuccess());
+    stopFtraceBtn = new QPushButton("■ Stop Trace");
+    stopFtraceBtn->setStyleSheet(Theme::btnDanger());
+    stopFtraceBtn->setEnabled(false);
+    ftraceBtnRow->addWidget(startFtraceBtn); ftraceBtnRow->addWidget(stopFtraceBtn);
+    ftraceL->addLayout(ftraceBtnRow);
+    topRow->addWidget(ftraceCard);
+    outer->addLayout(topRow);
+
+    // Counter table
+    auto* counterCard = new QWidget(); counterCard->setStyleSheet(Theme::card());
+    auto* ctL = new QVBoxLayout(counterCard); ctL->setContentsMargins(12,10,12,10);
+    auto* ctTitle = new QLabel("Live Counter Values");
+    ctTitle->setStyleSheet(QString("color:%1;font-size:12px;font-weight:bold;").arg(Theme::TEXT_PRIMARY));
+    ctL->addWidget(ctTitle);
+
+    counterTable = new QTableWidget(0, 3);
+    counterTable->setHorizontalHeaderLabels({"Counter","Total","Rate/sec"});
+    counterTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    counterTable->verticalHeader()->setVisible(false);
+    counterTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    counterTable->setFixedHeight(140);
+    counterTable->setStyleSheet(Theme::table());
+    ctL->addWidget(counterTable);
+    outer->addWidget(counterCard);
+
+    // Perf chart
+    auto* chartCard = new QWidget(); chartCard->setStyleSheet(Theme::card());
+    auto* chL = new QVBoxLayout(chartCard); chL->setContentsMargins(12,10,12,10);
+    auto* chTitle = new QLabel("Counter Rate Chart (delta per second)");
+    chTitle->setStyleSheet(QString("color:%1;font-size:11px;font-weight:bold;").arg(Theme::TEXT_PRIMARY));
+    chL->addWidget(chTitle);
+    perfChart = new PerfChart();
+    chL->addWidget(perfChart);
+    outer->addWidget(chartCard);
+
+    // Trace log
+    auto* logCard = new QWidget(); logCard->setStyleSheet(Theme::card());
+    auto* ll = new QVBoxLayout(logCard); ll->setContentsMargins(12,10,12,10);
+    auto* logTitle = new QLabel("Kernel Trace Events");
+    logTitle->setStyleSheet(QString("color:%1;font-size:12px;font-weight:bold;").arg(Theme::TEXT_PRIMARY));
+    ll->addWidget(logTitle);
+    traceLog = new QTextEdit();
+    traceLog->setReadOnly(true);
+    traceLog->setMinimumHeight(110);
+    traceLog->setMaximumHeight(160);
+    traceLog->setStyleSheet(Theme::termLog());
+    ll->addWidget(traceLog);
+    outer->addWidget(logCard);
+
+    statusLabel = new QLabel("Ready — start perf counters or a trace probe above.");
+    statusLabel->setStyleSheet(QString("color:%1;font-size:11px;").arg(Theme::TEXT_MUTED));
+    outer->addWidget(statusLabel);
+
+    connect(startPerfBtn,   &QPushButton::clicked, this, &EbpfLab::onStartPerfCounters);
+    connect(stopPerfBtn,    &QPushButton::clicked, this, &EbpfLab::onStopPerfCounters);
+    connect(startFtraceBtn, &QPushButton::clicked, this, &EbpfLab::onStartFtrace);
+    connect(stopFtraceBtn,  &QPushButton::clicked, this, &EbpfLab::onStopFtrace);
+    connect(probeBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &EbpfLab::onProbeChanged);
+
+    onProbeChanged(0);
+}
+
+EbpfLab::~EbpfLab() {
+    closePerfCounters();
+    disableFtrace();
+}
+
+// ── Perf counters ─────────────────────────────────────────────────────────────
+
+bool EbpfLab::openPerfCounters() {
+    closePerfCounters();
+    counters.clear();
+
+    struct CounterDef { uint32_t type; uint64_t config; const char* name; };
+    static const CounterDef defs[] = {
+        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS,  "instructions"},
+        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES,  "cache_misses"},
+        {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CONTEXT_SWITCHES, "ctx_switches"},
+        {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS,   "page_faults"},
+        {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_CLOCK,     "cpu_clock_ns"},
+    };
+
+    bool anyOk = false;
+    for (auto& def : defs) {
+        struct perf_event_attr attr = {};
+        attr.type           = def.type;
+        attr.size           = sizeof(attr);
+        attr.config         = def.config;
+        attr.disabled       = 1;
+        attr.exclude_kernel = 0;
+        attr.exclude_hv     = 1;
+
+        int fd = (int)perf_event_open(&attr, -1, 0, -1, 0);
+        if (fd < 0) {
+            // Try with exclude_kernel=1 (unprivileged)
+            attr.exclude_kernel = 1;
+            fd = (int)perf_event_open(&attr, -1, 0, -1, 0);
+        }
+
+        PerfCounter c;
+        c.name  = def.name;
+        c.value = 0;
+        c.delta = 0;
+        c.fd    = fd;
+        if (fd >= 0) {
+            ioctl(fd, PERF_EVENT_IOC_RESET,  0);
+            ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
+            anyOk = true;
+        }
+        counters.append(c);
+    }
+    return anyOk;
+}
+
+void EbpfLab::closePerfCounters() {
+    for (auto& c : counters) if (c.fd >= 0) { ::close(c.fd); c.fd = -1; }
+    if (perfTimer) { perfTimer->stop(); delete perfTimer; perfTimer = nullptr; }
+}
+
+void EbpfLab::onStartPerfCounters() {
+    if (!openPerfCounters()) {
+        statusLabel->setText("⚠ Could not open perf events. Try: sudo setcap cap_perfmon+ep build/LearnOS");
+        emit explanationNeeded(
+            "<b>perf_event_open() failed</b><br><br>"
+            "Hardware counters require <code>CAP_PERFMON</code> or running as root. "
+            "Run: <code>sudo setcap cap_perfmon+ep build/LearnOS</code><br><br>"
+            "Software counters (context switches, page faults) may still work.");
+        return;
+    }
+    startPerfBtn->setEnabled(false);
+    stopPerfBtn->setEnabled(true);
+    perfChart->clear();
+    statusLabel->setText("Perf counters active — reading system-wide hardware events.");
+
+    perfTimer = new QTimer(this);
+    connect(perfTimer, &QTimer::timeout, this, &EbpfLab::onPerfTick);
+    perfTimer->start(1000);
+
+    emit explanationNeeded(
+        "<b>perf_event_open() — Hardware Performance Counters</b><br><br>"
+        "The CPU has built-in registers that count low-level events: instructions executed, "
+        "cache misses, branch mispredictions. <code>perf_event_open()</code> is the Linux "
+        "syscall to read them.<br><br>"
+        "<b>Instructions:</b> Total CPU instructions retired<br>"
+        "<b>Cache misses:</b> L3 cache misses (expensive — goes to RAM)<br>"
+        "<b>Context switches:</b> How often the scheduler switches processes<br>"
+        "<b>Page faults:</b> Virtual memory pages not yet in RAM<br><br>"
+        "This is the same data <code>perf stat</code> shows — done via raw syscall.");
+}
+
+void EbpfLab::onStopPerfCounters() {
+    closePerfCounters();
+    startPerfBtn->setEnabled(true);
+    stopPerfBtn->setEnabled(false);
+    statusLabel->setText("Perf counters stopped.");
+}
+
+void EbpfLab::onPerfTick() {
+    readCounters();
+    refreshCounterTable();
+}
+
+void EbpfLab::readCounters() {
+    for (auto& c : counters) {
+        if (c.fd < 0) continue;
+        uint64_t val = 0;
+        if (read(c.fd, &val, sizeof(val)) == sizeof(val)) {
+            c.delta = (long)val - c.value;
+            c.value = (long)val;
+            perfChart->addSample(c.name, c.delta);
+        }
+    }
+}
+
+void EbpfLab::refreshCounterTable() {
+    counterTable->setRowCount(0);
+    for (auto& c : counters) {
+        int row = counterTable->rowCount();
+        counterTable->insertRow(row);
+        auto cell = [&](const QString& t, const char* col=nullptr){
+            auto* i = new QTableWidgetItem(t);
+            i->setTextAlignment(Qt::AlignCenter);
+            if (col) i->setForeground(QColor(col));
+            return i;
+        };
+        const char* avail = c.fd >= 0 ? Theme::TEXT_PRIMARY : Theme::TEXT_MUTED;
+        counterTable->setItem(row, 0, cell(c.name, avail));
+        counterTable->setItem(row, 1, cell(c.fd >= 0 ? QString::number(c.value) : "N/A (no permission)", avail));
+        counterTable->setItem(row, 2, cell(c.fd >= 0 ? QString("+%1/s").arg(c.delta) : "—",
+                                          c.delta > 0 ? Theme::GREEN : Theme::TEXT_MUTED));
+    }
+}
+
+// ── Ftrace ────────────────────────────────────────────────────────────────────
+
+bool EbpfLab::enableFtrace(const QString& probe) {
+    // Write to tracefs
+    static const QStringList tracefsRoots = {
+        "/sys/kernel/debug/tracing",
+        "/sys/kernel/tracing"
+    };
+    QString tracefsRoot;
+    for (auto& r : tracefsRoots) {
+        if (QFileInfo::exists(r + "/trace_pipe")) { tracefsRoot = r; break; }
+    }
+    if (tracefsRoot.isEmpty()) return false;
+
+    // Map probe selection to event filter
+    static const char* events[] = {
+        "sched/sched_switch",
+        "syscalls/sys_enter_read",
+        "syscalls/sys_enter_write",
+        "syscalls/sys_enter_mmap",
+        "kmem/kmalloc",
+    };
+
+    // Enable tracing
+    QFile tracingOn(tracefsRoot + "/tracing_on");
+    if (tracingOn.open(QIODevice::WriteOnly)) { tracingOn.write("1"); tracingOn.close(); }
+
+    QFile setEvent(tracefsRoot + "/set_event");
+    if (!setEvent.open(QIODevice::WriteOnly)) return false;
+
+    int idx = probeBox->currentIndex();
+    const char* ev = (idx >= 0 && idx < 5) ? events[idx] : events[0];
+    setEvent.write(ev); setEvent.close();
+
+    // Open trace_pipe for non-blocking reads
+    tracePipeFd = open((tracefsRoot + "/trace_pipe").toLocal8Bit().constData(),
+                       O_RDONLY | O_NONBLOCK);
+    if (tracePipeFd < 0) return false;
+
+    // Use QTimer to poll (pipe doesn't work well with QSocketNotifier on all kernels)
+    auto* pollTimer = new QTimer(this);
+    connect(pollTimer, &QTimer::timeout, this, &EbpfLab::onFtraceReady);
+    pollTimer->start(200);
+    traceNotifier = (QSocketNotifier*)pollTimer; // store ref for cleanup
+
+    return true;
+}
+
+void EbpfLab::disableFtrace() {
+    if (traceNotifier) {
+        auto* t = qobject_cast<QTimer*>(traceNotifier);
+        if (t) { t->stop(); delete t; }
+        traceNotifier = nullptr;
+    }
+    if (tracePipeFd >= 0) { ::close(tracePipeFd); tracePipeFd = -1; }
+
+    // Disable tracing
+    static const QStringList roots = {"/sys/kernel/debug/tracing","/sys/kernel/tracing"};
+    for (auto& r : roots) {
+        QString p = r + "/set_event";
+        if (QFileInfo::exists(p)) {
+            QFile f(p); if(f.open(QIODevice::WriteOnly)){f.write("");f.close();}
+            break;
+        }
+    }
+    ftraceActive = false;
+}
+
+void EbpfLab::onStartFtrace() {
+    if (!enableFtrace(probeBox->currentText())) {
+        statusLabel->setText("⚠ ftrace unavailable. Mount debugfs: sudo mount -t debugfs none /sys/kernel/debug");
+        emit explanationNeeded(
+            "<b>ftrace requires debugfs</b><br><br>"
+            "Mount with: <code>sudo mount -t debugfs none /sys/kernel/debug</code><br><br>"
+            "On Kali this is usually already mounted. If not, it needs root. "
+            "Also needs <code>CAP_SYS_ADMIN</code>.");
+        return;
+    }
+    ftraceActive = true;
+    startFtraceBtn->setEnabled(false);
+    stopFtraceBtn->setEnabled(true);
+    statusLabel->setText("ftrace active — kernel events streaming from trace_pipe.");
+    emit explanationNeeded(QString(
+        "<b>ftrace — Kernel Function Tracer</b><br><br>"
+        "Tracing: <b>%1</b><br><br>"
+        "ftrace writes to a ring buffer inside the kernel. "
+        "We read from <code>/sys/kernel/debug/tracing/trace_pipe</code> — "
+        "every kernel event matching the filter appears here in real time.<br><br>"
+        "This is what <code>trace-cmd</code> and <code>perf trace</code> use internally. "
+        "No agent, no overhead when disabled — pure kernel instrumentation."
+    ).arg(probeBox->currentText()));
+}
+
+void EbpfLab::onStopFtrace() {
+    disableFtrace();
+    startFtraceBtn->setEnabled(true);
+    stopFtraceBtn->setEnabled(false);
+    statusLabel->setText("ftrace stopped.");
+}
+
+void EbpfLab::onFtraceReady() {
+    if (tracePipeFd < 0) return;
+    char buf[4096];
+    ssize_t n = read(tracePipeFd, buf, sizeof(buf)-1);
+    if (n <= 0) return;
+    buf[n] = '\0';
+    // Append to log, keep last 200 lines
+    QString text = QString::fromLocal8Bit(buf);
+    traceLog->append(text.trimmed());
+    // Trim log
+    QStringList lines = traceLog->toPlainText().split('\n');
+    if (lines.size() > 200) {
+        traceLog->setPlainText(lines.mid(lines.size()-200).join('\n'));
+        auto cursor = traceLog->textCursor();
+        cursor.movePosition(QTextCursor::End);
+        traceLog->setTextCursor(cursor);
+    }
+}
+
+void EbpfLab::onProbeChanged(int idx) {
+    static const char* exps[] = {
+        "<b>sched_switch</b><br><br>"
+        "Fires every time the kernel scheduler switches from one process/thread to another. "
+        "You'll see: <code>prev_comm -&gt; next_comm, pid, prio, state</code>. "
+        "This reveals context switch rates — high rates = lots of switching overhead.",
+
+        "<b>sys_enter_read</b><br><br>"
+        "Fires every time any process calls the <code>read()</code> syscall. "
+        "You'll see which process, which file descriptor, and how many bytes. "
+        "Watch your I/O worker's read calls stream in real time.",
+
+        "<b>sys_enter_write</b><br><br>"
+        "Every <code>write()</code> syscall — process, fd, count. "
+        "Your I/O sandbox process will light this up. "
+        "Terminal keystrokes also appear here (fd=1, count=1).",
+
+        "<b>sys_enter_mmap</b><br><br>"
+        "Every <code>mmap()</code> call. Memory allocations, file mappings, "
+        "shared memory, executable loading — all use mmap. "
+        "Start a process and watch its startup mmap calls.",
+
+        "<b>kmalloc</b><br><br>"
+        "Every kernel memory allocation. Shows size and call site. "
+        "This requires CAP_SYS_ADMIN and debugfs. High frequency = "
+        "kernel is very busy allocating internal structures.",
+    };
+    if (idx >= 0 && idx < 5) emit explanationNeeded(exps[idx]);
+}

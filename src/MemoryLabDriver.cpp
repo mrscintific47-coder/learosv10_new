@@ -1,0 +1,137 @@
+#include "MemoryLabDriver.h"
+#include <QCoreApplication>
+#include <QDir>
+#include <QFileInfo>
+
+MemoryLabDriver::MemoryLabDriver(QObject* parent) : QObject(parent) {
+    proc = new QProcess(this);
+    connect(proc, &QProcess::readyReadStandardOutput, this, &MemoryLabDriver::onReadyRead);
+    connect(proc, &QProcess::errorOccurred, this, &MemoryLabDriver::onProcessError);
+    connect(proc, &QProcess::finished, this, &MemoryLabDriver::onProcessFinished);
+}
+
+MemoryLabDriver::~MemoryLabDriver() {
+    stop();
+}
+
+static QString findWorkerBinary() {
+    // The worker is built alongside the main app by CMake. Look next to
+    // the running executable first (normal case), then fall back to the
+    // build directory layout used during development.
+    QString appDir = QCoreApplication::applicationDirPath();
+    QStringList candidates = {
+        appDir + "/memlab_worker",
+        appDir + "/tools/memlab_worker",
+        appDir + "/../tools/memlab_worker",
+    };
+    for (auto& c : candidates) {
+        if (QFileInfo::exists(c)) return c;
+    }
+    return appDir + "/memlab_worker"; // best effort; will fail loudly if missing
+}
+
+void MemoryLabDriver::start() {
+    if (proc->state() != QProcess::NotRunning) return;
+    buffer.clear();
+    proc->start(findWorkerBinary(), {});
+}
+
+void MemoryLabDriver::stop() {
+    if (proc->state() == QProcess::NotRunning) return;
+    proc->kill();
+    proc->waitForFinished(500);
+}
+
+bool MemoryLabDriver::isRunning() const {
+    return proc->state() == QProcess::Running;
+}
+
+void MemoryLabDriver::send(const QString& line) {
+    if (!isRunning()) {
+        emit commandFailed("Worker is not running — click Restart Worker.");
+        return;
+    }
+    proc->write((line + "\n").toUtf8());
+}
+
+void MemoryLabDriver::alloc(long size, const QString& strategy) {
+    send(QString("ALLOC %1 %2").arg(size).arg(strategy));
+}
+
+void MemoryLabDriver::freeBlock(int id) {
+    send(QString("FREE %1").arg(id));
+}
+
+void MemoryLabDriver::writeBlock(int id, int byteVal) {
+    send(QString("WRITE %1 %2").arg(id).arg(byteVal));
+}
+
+void MemoryLabDriver::resetArena() {
+    send("RESET");
+}
+
+void MemoryLabDriver::onReadyRead() {
+    buffer += proc->readAllStandardOutput();
+
+    while (true) {
+        int nl = buffer.indexOf('\n');
+        if (nl < 0) break;
+        QString line = QString::fromUtf8(buffer.left(nl)).trimmed();
+        buffer.remove(0, nl + 1);
+        if (!line.isEmpty()) processLine(line);
+    }
+}
+
+void MemoryLabDriver::processLine(const QString& line) {
+    if (line.startsWith("READY")) {
+        long cap = line.section(' ', 1, 1).toLong();
+        emit workerReady(cap);
+        return;
+    }
+    if (line.startsWith("BLOCK")) {
+        QStringList parts = line.split(' ', Qt::SkipEmptyParts);
+        if (parts.size() >= 6) {
+            ArenaBlock b;
+            b.id       = parts[1].toInt();
+            b.offset   = parts[2].toLong();
+            b.size     = parts[3].toLong();
+            b.used     = parts[4].toInt() != 0;
+            b.fillByte = parts[5].toInt();
+            pendingBlocks.push_back(b);
+        }
+        return;
+    }
+    if (line.startsWith("ARENA")) {
+        QStringList parts = line.split(' ', Qt::SkipEmptyParts);
+        ArenaSummary s;
+        if (parts.size() >= 6) {
+            s.totalBytes     = parts[1].toLong();
+            s.usedBytes      = parts[2].toLong();
+            s.freeBytes      = parts[3].toLong();
+            s.blockCount     = parts[4].toInt();
+            s.largestFreeRun = parts[5].toLong();
+        }
+        emit arenaUpdated(pendingBlocks, s);
+        pendingBlocks.clear();
+        return;
+    }
+    if (line == "OK") {
+        return; // terminator for a successful multi-line response; state already emitted
+    }
+    if (line.startsWith("ERR")) {
+        emit commandFailed(line.mid(4));
+        pendingBlocks.clear();
+        return;
+    }
+    if (line == "PONG") {
+        return;
+    }
+}
+
+void MemoryLabDriver::onProcessError(QProcess::ProcessError) {
+    emit commandFailed("Worker process error — it may need a restart.");
+}
+
+void MemoryLabDriver::onProcessFinished(int, QProcess::ExitStatus) {
+    emit workerDied();
+}
