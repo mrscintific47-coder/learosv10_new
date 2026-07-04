@@ -139,6 +139,46 @@ SignalPanel::SignalPanel(QWidget* parent) : QWidget(parent) {
     sigLayout->addWidget(statusLabel);
     rightLayout->addWidget(sigCard);
 
+    // Signal masks card — reads SigPnd/SigBlk/SigCgt from /proc
+    auto* maskCard = new QWidget();
+    maskCard->setStyleSheet(Theme::card());
+    auto* maskLayout = new QVBoxLayout(maskCard);
+    maskLayout->setContentsMargins(12,8,12,8);
+    maskLayout->setSpacing(4);
+    auto* maskTitle = new QLabel("Signal Masks  —  /proc/[pid]/status");
+    maskTitle->setStyleSheet(QString("color:%1;font-size:11px;font-weight:bold;").arg(Theme::TEXT_PRIMARY));
+    maskLayout->addWidget(maskTitle);
+    auto* maskHint = new QLabel("SigPnd=pending  SigBlk=blocked  SigCgt=caught by sigaction handler");
+    maskHint->setStyleSheet(QString("color:%1;font-size:9px;").arg(Theme::TEXT_MUTED));
+    maskLayout->addWidget(maskHint);
+    signalMaskLabel = new QLabel("Select a process to read its signal bitmasks from /proc");
+    signalMaskLabel->setWordWrap(true);
+    signalMaskLabel->setStyleSheet(QString(
+        "font-family:Consolas; font-size:10px; color:%1; background:%2; border-radius:6px; padding:5px;"
+    ).arg(Theme::TEXT_PRIMARY).arg(Theme::BG_INPUT));
+    maskLayout->addWidget(signalMaskLabel);
+    rightLayout->addWidget(maskCard);
+
+    // Async-signal-safety demo
+    auto* asyncCard = new QWidget();
+    asyncCard->setStyleSheet(Theme::card());
+    auto* asyncL = new QVBoxLayout(asyncCard);
+    asyncL->setContentsMargins(12,8,12,8);
+    asyncL->setSpacing(4);
+    auto* asyncTitle = new QLabel("Bug Demo: Async-Signal-Safety Violation");
+    asyncTitle->setStyleSheet(QString("color:%1;font-size:11px;font-weight:bold;").arg(Theme::TEXT_PRIMARY));
+    asyncL->addWidget(asyncTitle);
+    auto* asyncHint = new QLabel(
+        "Spawns a target that calls non-reentrant <code>printf()</code> from a SIGALRM handler "
+        "while the main thread is also in printf(). Corruption or deadlock results.");
+    asyncHint->setWordWrap(true);
+    asyncHint->setStyleSheet(QString("color:%1;font-size:10px;").arg(Theme::TEXT_SECONDARY));
+    asyncL->addWidget(asyncHint);
+    asyncDemoBtn = new QPushButton("⚡  Run Async-Signal-Safety Demo");
+    asyncDemoBtn->setStyleSheet(Theme::btnDanger());
+    asyncL->addWidget(asyncDemoBtn);
+    rightLayout->addWidget(asyncCard);
+
     // Signal log
     auto* logCard = new QWidget();
     logCard->setStyleSheet(Theme::card());
@@ -169,6 +209,8 @@ SignalPanel::SignalPanel(QWidget* parent) : QWidget(parent) {
             this, &SignalPanel::onSpawnTarget);
     connect(killBtn,    &QPushButton::clicked,
             this, &SignalPanel::onKillTarget);
+    connect(asyncDemoBtn, &QPushButton::clicked,
+            this, &SignalPanel::onAsyncDemo);
     connect(signalBox,  QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &SignalPanel::onSignalSelected);
     connect(processTable, &QTableWidget::cellClicked,
@@ -184,6 +226,10 @@ SignalPanel::SignalPanel(QWidget* parent) : QWidget(parent) {
 }
 
 SignalPanel::~SignalPanel() {
+    if (asyncDemoPid > 0) {
+        kill(asyncDemoPid, SIGKILL);
+        waitpid(asyncDemoPid, nullptr, WNOHANG);
+    }
     for (pid_t pid : ownTargets) {
         kill(pid, SIGKILL);
         waitpid(pid, nullptr, WNOHANG);
@@ -331,6 +377,7 @@ void SignalPanel::onTargetSelected(int row, int) {
     if (!item) return;
     selectedPid = item->data(Qt::UserRole).toInt();
     statusLabel->setText(QString("Target: PID %1 — ready to fire").arg(selectedPid));
+    readSignalMasks(selectedPid);
 }
 
 void SignalPanel::onSpawnTarget() {
@@ -402,4 +449,104 @@ QString SignalPanel::processState(pid_t pid) {
         }
     }
     return "Gone";
+}
+
+// ── Signal mask reading + async-signal-safety demo ───────────────────────────
+
+void SignalPanel::readSignalMasks(pid_t pid) {
+    if (pid <= 0) return;
+    std::ifstream f("/proc/" + std::to_string(pid) + "/status");
+    std::string line;
+    QString sigPnd, sigBlk, sigCgt;
+    while (std::getline(f, line)) {
+        if (line.rfind("SigPnd:", 0) == 0) sigPnd = QString::fromStdString(line.substr(7)).trimmed();
+        if (line.rfind("SigBlk:", 0) == 0) sigBlk = QString::fromStdString(line.substr(7)).trimmed();
+        if (line.rfind("SigCgt:", 0) == 0) sigCgt = QString::fromStdString(line.substr(7)).trimmed();
+    }
+    if (sigPnd.isEmpty()) {
+        signalMaskLabel->setText(QString("Cannot read /proc/%1/status — process may be gone").arg(pid));
+        return;
+    }
+    // Decode which signals are set in each mask
+    auto decode = [](const QString& hex) -> QString {
+        bool ok; unsigned long long mask = hex.toULongLong(&ok, 16);
+        if (!ok) return hex;
+        QStringList names;
+        // Common signals (1-31)
+        static const char* snames[] = {
+            "", "HUP","INT","QUIT","ILL","TRAP","ABRT","BUS","FPE","KILL",
+            "USR1","SEGV","USR2","PIPE","ALRM","TERM","STKFLT","CHLD","CONT",
+            "STOP","TSTP","TTIN","TTOU","URG","XCPU","XFSZ","VTALRM","PROF",
+            "WINCH","IO","PWR","SYS"
+        };
+        for (int i = 1; i <= 31; i++) {
+            if (mask & (1ULL << (i - 1))) names.append(QString("SIG") + snames[i]);
+        }
+        if (names.isEmpty()) return "none";
+        return names.join(", ");
+    };
+
+    signalMaskLabel->setText(QString(
+        "PID %1\n"
+        "SigPnd (pending): %2\n"
+        "SigBlk (blocked): %3\n"
+        "SigCgt (caught):  %4"
+    ).arg(pid)
+     .arg(decode(sigPnd))
+     .arg(decode(sigBlk))
+     .arg(decode(sigCgt)));
+}
+
+void SignalPanel::onAsyncDemo() {
+    // Kill any existing demo
+    if (asyncDemoPid > 0) {
+        kill(asyncDemoPid, SIGKILL);
+        waitpid(asyncDemoPid, nullptr, WNOHANG);
+        asyncDemoPid = -1;
+    }
+
+    // Fork a child that demonstrates async-signal-safety violation:
+    // It installs a SIGALRM handler that calls printf() (non-async-signal-safe)
+    // while the main loop is also calling printf(). This can cause deadlock or
+    // corruption because printf() uses an internal non-reentrant lock.
+    pid_t pid = fork();
+    if (pid == 0) {
+        // Install SIGALRM handler that calls printf — NOT async-signal-safe
+        signal(SIGALRM, [](int) {
+            // printf uses a global lock — calling from signal handler while main
+            // thread holds that lock = deadlock or corruption
+            printf("[SIGALRM handler] called from signal — printf in handler!\n");
+            fflush(stdout);
+        });
+        alarm(1); // fire SIGALRM in 1 second
+
+        // Main loop also calls printf repeatedly
+        for (int i = 0; ; i++) {
+            printf("Main loop iteration %d (unsafe printf)\n", i);
+            fflush(stdout);
+            usleep(100000); // 100ms
+        }
+        _exit(0);
+    }
+    if (pid > 0) {
+        asyncDemoPid = pid;
+        ownTargets.push_back(pid);
+        onRefreshTargets();
+        signalLog->append(QString("[ASYNC DEMO] Spawned PID %1 — printf() from SIGALRM handler").arg(pid));
+
+        emit explanationNeeded(QString(
+            "<b>Async-Signal-Safety Violation Demo</b><br><br>"
+            "PID %1 was spawned with:<br>"
+            "1. A main loop calling <code>printf()</code> every 100ms<br>"
+            "2. A SIGALRM handler that <b>also</b> calls <code>printf()</code><br><br>"
+            "<code>printf()</code> uses an internal global lock (<code>flockfile()</code>). "
+            "If the SIGALRM handler fires <b>while the main thread holds that lock</b>, "
+            "the handler tries to re-acquire it — but the same thread can't acquire a "
+            "non-reentrant lock it already holds → <b>deadlock</b>.<br><br>"
+            "<b>The rule:</b> Signal handlers must only call <b>async-signal-safe</b> functions. "
+            "The only safe I/O function is <code>write()</code> (syscall directly). "
+            "Never call: <code>printf, malloc, free, mutex_lock</code>, or any libc I/O from a handler.<br><br>"
+            "<b>Correct fix:</b> Set a volatile flag in the handler and check it in the main loop."
+        ).arg(pid));
+    }
 }

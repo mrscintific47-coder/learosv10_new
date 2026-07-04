@@ -4,12 +4,15 @@
 #include <QPainterPath>
 #include <QTime>
 #include <QScrollBar>
+#include <QCoreApplication>
+#include <QFileInfo>
 #include <fstream>
 #include <sstream>
 #include <sys/wait.h>
 #include <dirent.h>
+#include <algorithm>
 
-// ── Palette shared between timeline + table ───────────────────────────────────
+// ── Palette ───────────────────────────────────────────────────────────────────
 static const QColor THREAD_PALETTE[] = {
     QColor("#4F6EF7"), QColor("#22C55E"), QColor("#F97316"),
     QColor("#A855F7"), QColor("#EF4444"), QColor("#14B8A6"),
@@ -27,9 +30,7 @@ ThreadTimeline::ThreadTimeline(QWidget* p) : QWidget(p) {
     setMinimumHeight(140);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     setStyleSheet(QString(
-        "background: #0F172A;"
-        "border-radius: 10px;"
-        "border: 1px solid %1;"
+        "background: #0F172A; border-radius: 10px; border: 1px solid %1;"
     ).arg(Theme::BORDER));
 }
 
@@ -55,7 +56,6 @@ void ThreadTimeline::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
 
-    // Dark terminal background
     QPainterPath bg;
     bg.addRoundedRect(rect(), 10, 10);
     p.fillPath(bg, QColor("#0F172A"));
@@ -80,22 +80,17 @@ void ThreadTimeline::paintEvent(QPaintEvent*) {
     int chartW  = w - labelW - 12;
     float tickW = history.size() > 0 ? (float)chartW / history.size() : 8.f;
 
-    // Draw subtle grid lines
+    // Grid lines
     p.setPen(QPen(QColor("#1E293B"), 1));
     for (int i = 0; i <= numT; i++) {
         int y = topPad + i * rowH;
         p.drawLine(labelW, y, w - 6, y);
     }
 
-    // Draw thread labels + row backgrounds
     for (int i = 0; i < numT; i++) {
         int y = topPad + i * rowH;
-        // Subtle alternating row tint
-        if (i % 2 == 0) {
-            QRect rowBg(labelW, y, chartW, rowH);
-            p.fillRect(rowBg, QColor(255, 255, 255, 5));
-        }
-        // TID label
+        if (i % 2 == 0) p.fillRect(QRect(labelW, y, chartW, rowH), QColor(255,255,255,5));
+
         QColor lc = colors[tids[i]];
         p.setPen(lc.lighter(130));
         p.setFont(QFont("Consolas", 8, QFont::Bold));
@@ -103,7 +98,6 @@ void ThreadTimeline::paintEvent(QPaintEvent*) {
             QString("TID %1").arg(tids[i]));
     }
 
-    // Draw tick bars
     for (int t = 0; t < history.size(); t++) {
         for (auto& st : history[t].states) {
             int i = tids.indexOf(st.first);
@@ -116,29 +110,176 @@ void ThreadTimeline::paintEvent(QPaintEvent*) {
 
             QPainterPath bp;
             bp.addRoundedRect(bar, 2, 2);
-
             if (running) {
                 p.fillPath(bp, colors[st.first]);
             } else {
-                QColor c = colors[st.first];
-                c.setAlpha(35);
+                QColor c = colors[st.first]; c.setAlpha(35);
                 p.fillPath(bp, c);
             }
         }
     }
 
-    // Legend at the bottom-right
-    int legendX = labelW + 4;
-    int legendY = h - botPad + 2;
+    // Legend
+    int legendX = labelW + 4, legendY = h - botPad + 2;
     p.setFont(QFont("Segoe UI", 8));
-    // Running swatch
     p.fillRect(legendX, legendY - 7, 10, 7, QColor("#4F6EF7"));
     p.setPen(QColor("#94A3B8"));
     p.drawText(legendX + 13, legendY, "Running");
-    // Sleeping swatch
     QColor sleepC("#4F6EF7"); sleepC.setAlpha(35);
     p.fillRect(legendX + 70, legendY - 7, 10, 7, sleepC);
     p.drawText(legendX + 83, legendY, "Sleeping");
+}
+
+// ── LockGraphView ─────────────────────────────────────────────────────────────
+
+LockGraphView::LockGraphView(QWidget* p) : QWidget(p) {
+    setMinimumHeight(160);
+    setStyleSheet(QString(
+        "background:white; border-radius:10px; border:1px solid %1;"
+    ).arg(Theme::BORDER));
+}
+
+void LockGraphView::clear() {
+    threads.clear(); deadlockDetected = false; deadTidA = -1; deadTidB = -1; update();
+}
+
+void LockGraphView::setThreads(const QVector<ThreadInfo>& t) {
+    threads = t; update();
+}
+
+void LockGraphView::setDeadlockDetected(long a, long b) {
+    deadlockDetected = true; deadTidA = a; deadTidB = b; update();
+}
+
+void LockGraphView::paintEvent(QPaintEvent*) {
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.fillRect(rect(), Qt::white);
+
+    if (threads.isEmpty()) {
+        p.setPen(QColor(Theme::TEXT_MUTED));
+        p.setFont(QFont("Segoe UI", 10));
+        p.drawText(rect(), Qt::AlignCenter,
+            "Lock graph appears when Deadlock demo is running.\n"
+            "Thread A: lock A → try B.   Thread B: lock B → try A.\n"
+            "ABBA inversion → neither can proceed.");
+        return;
+    }
+
+    int w = width(), h = height();
+    int boxW = 100, boxH = 40, pad = 20;
+
+    // Draw two mutex boxes in the center
+    int midX = w / 2;
+    int mutexY = h / 2 - boxH / 2;
+    int mutexSpacing = 140;
+    QRect mutA(midX - mutexSpacing - boxW / 2, mutexY, boxW, boxH);
+    QRect mutB(midX + mutexSpacing - boxW / 2, mutexY, boxW, boxH);
+
+    auto drawMutex = [&](QRect r, const QString& name, QColor bg, QColor border) {
+        QPainterPath path; path.addRoundedRect(r, 8, 8);
+        p.fillPath(path, bg);
+        p.setPen(QPen(border, 2));
+        p.drawPath(path);
+        p.setPen(border);
+        p.setFont(QFont("Consolas", 10, QFont::Bold));
+        p.drawText(r, Qt::AlignCenter, name);
+    };
+
+    drawMutex(mutA, "mutex_A", QColor("#EEF2FF"), QColor(Theme::BLUE));
+    drawMutex(mutB, "mutex_B", QColor("#FAF5FF"), QColor(Theme::PURPLE));
+
+    // Draw threads on left/right sides
+    QVector<ThreadInfo> relevant;
+    for (auto& t : threads) {
+        if (t.holdsLock != "none" || t.waitsForLock != "none")
+            relevant.append(t);
+    }
+    if (relevant.isEmpty()) {
+        // Show all threads
+        for (auto& t : threads)
+            relevant.append(t);
+    }
+
+    int tidY_top = 30;
+    for (int i = 0; i < std::min((int)relevant.size(), 4); i++) {
+        auto& th = relevant[i];
+        int tidY = tidY_top + i * (boxH + 10);
+        int isLeft = (i % 2 == 0);
+        int tidX = isLeft ? pad : w - pad - boxW;
+        QRect tidBox(tidX, tidY, boxW, boxH);
+
+        // Thread box color
+        bool isDeadlocked = (th.tid == deadTidA || th.tid == deadTidB) && deadlockDetected;
+        QColor bg = isDeadlocked ? QColor("#FEF2F2") : QColor(Theme::BG_INPUT);
+        QColor border = isDeadlocked ? QColor(Theme::RED) : QColor(Theme::BORDER);
+        QPainterPath tp; tp.addRoundedRect(tidBox, 6, 6);
+        p.fillPath(tp, bg);
+        p.setPen(QPen(border, isDeadlocked ? 2.5 : 1));
+        p.drawPath(tp);
+        p.setPen(isDeadlocked ? QColor(Theme::RED) : QColor(Theme::TEXT_PRIMARY));
+        p.setFont(QFont("Consolas", 8, QFont::Bold));
+        p.drawText(tidBox, Qt::AlignCenter,
+            QString("TID %1\n%2").arg(th.tid)
+                .arg(isDeadlocked ? "DEADLOCKED" : th.state));
+
+        // Draw "holds" arrow (solid)
+        QRect* holdTarget = nullptr;
+        if (th.holdsLock == "A") holdTarget = &mutA;
+        if (th.holdsLock == "B") holdTarget = &mutB;
+        if (holdTarget) {
+            QPoint from(isLeft ? tidBox.right() : tidBox.left(), tidBox.center().y());
+            QPoint to(holdTarget->center().x(), holdTarget->center().y());
+            p.setPen(QPen(QColor(Theme::GREEN), 2, Qt::SolidLine, Qt::RoundCap));
+            p.drawLine(from, to);
+            // Label
+            QPoint mid((from.x() + to.x()) / 2, (from.y() + to.y()) / 2 - 8);
+            p.setFont(QFont("Segoe UI", 7, QFont::Bold));
+            p.setPen(QColor(Theme::GREEN));
+            p.drawText(mid, "holds");
+        }
+
+        // Draw "waits for" arrow (dashed)
+        QRect* waitTarget = nullptr;
+        if (th.waitsForLock == "A") waitTarget = &mutA;
+        if (th.waitsForLock == "B") waitTarget = &mutB;
+        if (waitTarget) {
+            QPoint from(isLeft ? tidBox.right() : tidBox.left(), tidBox.center().y() + 8);
+            QPoint to(waitTarget->center().x(), waitTarget->center().y() + 8);
+            p.setPen(QPen(QColor(Theme::ORANGE), 2, Qt::DashLine, Qt::RoundCap));
+            p.drawLine(from, to);
+            QPoint mid((from.x() + to.x()) / 2, (from.y() + to.y()) / 2 - 8);
+            p.setFont(QFont("Segoe UI", 7, QFont::Bold));
+            p.setPen(QColor(Theme::ORANGE));
+            p.drawText(mid, "waits for");
+        }
+    }
+
+    // Deadlock banner
+    if (deadlockDetected) {
+        QRect banner(pad, h - 30, w - pad * 2, 22);
+        QPainterPath bp; bp.addRoundedRect(banner, 6, 6);
+        p.fillPath(bp, QColor("#FEF2F2"));
+        p.setPen(QColor(Theme::RED));
+        p.setFont(QFont("Segoe UI", 9, QFont::Bold));
+        p.drawText(banner, Qt::AlignCenter,
+            QString("⚠ DEADLOCK DETECTED: TID %1 ↔ TID %2 (neither can proceed)")
+                .arg(deadTidA).arg(deadTidB));
+    }
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+static QString findThreadWorker() {
+    QString appDir = QCoreApplication::applicationDirPath();
+    QStringList candidates = {
+        appDir + "/learnos_thread_worker",
+        appDir + "/tools/learnos_thread_worker",
+        appDir + "/../tools/learnos_thread_worker",
+    };
+    for (auto& c : candidates)
+        if (QFileInfo::exists(c)) return c;
+    return appDir + "/learnos_thread_worker";
 }
 
 // ── ThreadLab ─────────────────────────────────────────────────────────────────
@@ -149,29 +290,24 @@ ThreadLab::ThreadLab(QWidget* parent) : QWidget(parent) {
     outer->setContentsMargins(16, 16, 16, 16);
     outer->setSpacing(12);
 
-    // ── Title row ──────────────────────────────────────────────────────────────
+    // ── Title row ─────────────────────────────────────────────────────────────
     auto* titleRow = new QHBoxLayout();
-    auto* title = new QLabel("🧵  Thread Lab — POSIX Threads & Synchronization");
-    title->setStyleSheet(QString(
-        "color:%1; font-size:14px; font-weight:bold;"
-    ).arg(Theme::TEXT_PRIMARY));
-
-    auto* chip = new QLabel("● REAL THREADS");
+    auto* title = new QLabel("🧵  Thread Lab — POSIX Threads, Synchronization & Deadlock");
+    title->setStyleSheet(QString("color:%1; font-size:14px; font-weight:bold;").arg(Theme::TEXT_PRIMARY));
+    auto* chip = new QLabel("● REAL THREADS + /proc FUTEX STATE");
     chip->setStyleSheet(QString(
         "color:%1; background:%2; border-radius:8px; padding:3px 10px;"
         "font-size:10px; font-weight:bold;"
     ).arg(Theme::PURPLE).arg(Theme::PURPLE_LIGHT));
-
-    titleRow->addWidget(title);
-    titleRow->addStretch();
-    titleRow->addWidget(chip);
+    titleRow->addWidget(title); titleRow->addStretch(); titleRow->addWidget(chip);
     outer->addLayout(titleRow);
 
-    // ── Description banner ─────────────────────────────────────────────────────
     auto* banner = new QLabel(
-        "Spawns a real worker process with multiple POSIX threads. Threads share "
-        "the same PID but have unique TIDs in <b>/proc/[pid]/task/</b>. Watch them "
-        "run, sleep, and contend for mutexes in real time.");
+        "Spawns a real worker process with multiple POSIX threads. Thread wait state is "
+        "read from <b>/proc/[pid]/task/[tid]/status</b> — when a thread blocks on a "
+        "mutex or condvar the kernel puts it in state <b>S</b> (sleeping in futex_wait). "
+        "The <b>Deadlock</b> demo triggers a real ABBA lock ordering inversion and "
+        "shows the lock graph live. Toggle <b>With Lock</b> on/off to see a real data race.");
     banner->setWordWrap(true);
     banner->setStyleSheet(QString(
         "background:%1; color:%2; border:1px solid %3;"
@@ -179,37 +315,42 @@ ThreadLab::ThreadLab(QWidget* parent) : QWidget(parent) {
     ).arg(Theme::BLUE_LIGHT, Theme::TEXT_PRIMARY, Theme::BORDER));
     outer->addWidget(banner);
 
-    // ── Controls card ──────────────────────────────────────────────────────────
+    // ── Controls card ─────────────────────────────────────────────────────────
     auto* ctrl = new QWidget();
     ctrl->setStyleSheet(Theme::card());
     auto* cl = new QGridLayout(ctrl);
     cl->setContentsMargins(16, 12, 16, 12);
     cl->setSpacing(10);
 
-    // Row 0 labels
     auto mkLabel = [&](const QString& txt) -> QLabel* {
         auto* l = new QLabel(txt);
-        l->setStyleSheet(QString("color:%1; font-size:11px; font-weight:600;")
-            .arg(Theme::TEXT_SECONDARY));
+        l->setStyleSheet(QString("color:%1; font-size:11px; font-weight:600;").arg(Theme::TEXT_SECONDARY));
         return l;
     };
     cl->addWidget(mkLabel("Demo scenario"), 0, 0);
     cl->addWidget(mkLabel("Thread count"),  0, 1);
-    cl->addWidget(mkLabel(""),              0, 2);
-    cl->addWidget(mkLabel(""),              0, 3);
+    cl->addWidget(mkLabel("Lock"),          0, 2);
 
-    // Row 1 controls
     demoBox = new QComboBox();
     demoBox->addItem("CPU Race — all threads burn CPU in parallel");
     demoBox->addItem("Mutex Contention — threads fight for a single lock");
     demoBox->addItem("Producer-Consumer — cooperate via condvar");
     demoBox->addItem("Reader-Writer — shared data, rwlock");
+    demoBox->addItem("Race Condition — unsynchronized increment (corrupt output)");
+    demoBox->addItem("Deadlock — ABBA lock inversion (real pthread deadlock)");
     demoBox->setStyleSheet(Theme::input());
 
     threadCountSpin = new QSpinBox();
     threadCountSpin->setRange(2, 8);
     threadCountSpin->setValue(4);
     threadCountSpin->setStyleSheet(Theme::input());
+
+    lockToggle = new QCheckBox("With Lock");
+    lockToggle->setChecked(true);
+    lockToggle->setStyleSheet(QString("color:%1; font-size:11px;").arg(Theme::TEXT_PRIMARY));
+    lockToggle->setToolTip(
+        "Checked = threads increment WITH pthread_mutex (correct).\n"
+        "Unchecked = no lock — real data race (counter wrong).");
 
     spawnBtn = new QPushButton("▶  Spawn Worker");
     spawnBtn->setStyleSheet(Theme::btnPrimary());
@@ -220,22 +361,23 @@ ThreadLab::ThreadLab(QWidget* parent) : QWidget(parent) {
     killBtn->setMinimumHeight(34);
     killBtn->setEnabled(false);
 
-    cl->addWidget(demoBox,          1, 0);
-    cl->addWidget(threadCountSpin,  1, 1);
-    cl->addWidget(spawnBtn,         1, 2);
-    cl->addWidget(killBtn,          1, 3);
+    cl->addWidget(demoBox,         1, 0);
+    cl->addWidget(threadCountSpin, 1, 1);
+    cl->addWidget(lockToggle,      1, 2);
+    cl->addWidget(spawnBtn,        1, 3);
+    cl->addWidget(killBtn,         1, 4);
     cl->setColumnStretch(0, 3);
     cl->setColumnStretch(1, 1);
     cl->setColumnStretch(2, 1);
     cl->setColumnStretch(3, 1);
+    cl->setColumnStretch(4, 1);
     outer->addWidget(ctrl);
 
-    // ── Stats row (three mini-cards) ───────────────────────────────────────────
+    // ── Stats row ─────────────────────────────────────────────────────────────
     auto* statsRow = new QHBoxLayout();
     statsRow->setSpacing(10);
 
-    auto mkStatCard = [&](const QString& label, QLabel*& valueOut,
-                          const char* accent) -> QWidget* {
+    auto mkStatCard = [&](const QString& label, QLabel*& valueOut, const char* accent) -> QWidget* {
         auto* card = new QWidget();
         card->setStyleSheet(QString(
             "background: white; border-radius: 10px; border: 1px solid %1;"
@@ -244,19 +386,31 @@ ThreadLab::ThreadLab(QWidget* parent) : QWidget(parent) {
         vl->setContentsMargins(14, 10, 14, 10);
         vl->setSpacing(2);
         auto* lbl = new QLabel(label);
-        lbl->setStyleSheet(QString("color:%1; font-size:10px; font-weight:600;")
-            .arg(Theme::TEXT_MUTED));
+        lbl->setStyleSheet(QString("color:%1; font-size:10px; font-weight:600;").arg(Theme::TEXT_MUTED));
         valueOut = new QLabel("—");
-        valueOut->setStyleSheet(QString("color:%1; font-size:20px; font-weight:700;")
-            .arg(accent));
-        vl->addWidget(lbl);
-        vl->addWidget(valueOut);
+        valueOut->setStyleSheet(QString("color:%1; font-size:20px; font-weight:700;").arg(accent));
+        vl->addWidget(lbl); vl->addWidget(valueOut);
         return card;
     };
 
-    statsRow->addWidget(mkStatCard("Worker PID",       statPid,     Theme::BLUE));
-    statsRow->addWidget(mkStatCard("Live Threads",     statThreads, Theme::GREEN));
-    statsRow->addWidget(mkStatCard("Running (R)",      statRunning, Theme::ORANGE));
+    statsRow->addWidget(mkStatCard("Worker PID",   statPid,     Theme::BLUE));
+    statsRow->addWidget(mkStatCard("Live Threads", statThreads, Theme::GREEN));
+    statsRow->addWidget(mkStatCard("Running (R)",  statRunning, Theme::ORANGE));
+
+    auto* counterCard = new QWidget();
+    counterCard->setStyleSheet(QString(
+        "background: white; border-radius: 10px; border: 1px solid %1;"
+    ).arg(Theme::BORDER));
+    auto* ccl = new QVBoxLayout(counterCard);
+    ccl->setContentsMargins(14, 10, 14, 10);
+    ccl->setSpacing(2);
+    auto* counterTitle = new QLabel("Shared Counter");
+    counterTitle->setStyleSheet(QString("color:%1; font-size:10px; font-weight:600;").arg(Theme::TEXT_MUTED));
+    counterLabel = new QLabel("—");
+    counterLabel->setStyleSheet(QString("color:%1; font-size:20px; font-weight:700;").arg(Theme::PURPLE));
+    ccl->addWidget(counterTitle);
+    ccl->addWidget(counterLabel);
+    statsRow->addWidget(counterCard);
     outer->addLayout(statsRow);
 
     // ── Thread table ───────────────────────────────────────────────────────────
@@ -266,15 +420,13 @@ ThreadLab::ThreadLab(QWidget* parent) : QWidget(parent) {
     tl->setContentsMargins(14, 12, 14, 12);
     tl->setSpacing(6);
 
-    auto* tableTitle = new QLabel("Live Threads  —  /proc/[pid]/task/");
-    tableTitle->setStyleSheet(QString(
-        "color:%1; font-size:12px; font-weight:bold;"
-    ).arg(Theme::TEXT_PRIMARY));
+    auto* tableTitle = new QLabel("Live Threads  —  /proc/[pid]/task/[tid]/status (real kernel state)");
+    tableTitle->setStyleSheet(QString("color:%1; font-size:12px; font-weight:bold;").arg(Theme::TEXT_PRIMARY));
     tl->addWidget(tableTitle);
 
-    threadTable = new QTableWidget(0, 5);
+    threadTable = new QTableWidget(0, 6);
     threadTable->setHorizontalHeaderLabels(
-        {"TID", "State", "Voluntary ctx", "Involuntary ctx", "RSS"});
+        {"TID", "State", "Futex / Wait detail", "Vol ctx", "Involuntary ctx", "Holds / Waits"});
     threadTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     threadTable->verticalHeader()->setVisible(false);
     threadTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -293,25 +445,35 @@ ThreadLab::ThreadLab(QWidget* parent) : QWidget(parent) {
     auto* timL = new QVBoxLayout(timelineCard);
     timL->setContentsMargins(14, 12, 14, 12);
     timL->setSpacing(6);
-
     auto* timHeader = new QHBoxLayout();
     auto* timTitle = new QLabel("Thread Timeline");
-    timTitle->setStyleSheet(QString(
-        "color:%1; font-size:12px; font-weight:bold;"
-    ).arg(Theme::TEXT_PRIMARY));
-    auto* timHint = new QLabel("Solid = Running · Faded = Sleeping");
-    timHint->setStyleSheet(QString(
-        "color:%1; font-size:10px;"
-    ).arg(Theme::TEXT_MUTED));
-    timHeader->addWidget(timTitle);
-    timHeader->addStretch();
-    timHeader->addWidget(timHint);
+    timTitle->setStyleSheet(QString("color:%1; font-size:12px; font-weight:bold;").arg(Theme::TEXT_PRIMARY));
+    auto* timHint = new QLabel("Solid = Running · Faded = Sleeping (state from /proc)");
+    timHint->setStyleSheet(QString("color:%1; font-size:10px;").arg(Theme::TEXT_MUTED));
+    timHeader->addWidget(timTitle); timHeader->addStretch(); timHeader->addWidget(timHint);
     timL->addLayout(timHeader);
-
     timeline = new ThreadTimeline();
     timeline->setMinimumHeight(160);
     timL->addWidget(timeline);
-    outer->addWidget(timelineCard, 1);
+    outer->addWidget(timelineCard);
+
+    // ── Lock Graph card (only visible in deadlock demo) ────────────────────────
+    auto* lockCard = new QWidget();
+    lockCard->setStyleSheet(Theme::card());
+    auto* lkL = new QVBoxLayout(lockCard);
+    lkL->setContentsMargins(14, 12, 14, 12);
+    lkL->setSpacing(6);
+    auto* lkHdr = new QHBoxLayout();
+    auto* lkTitle = new QLabel("Lock Graph  —  who holds / waits for which mutex");
+    lkTitle->setStyleSheet(QString("color:%1; font-size:12px; font-weight:bold;").arg(Theme::TEXT_PRIMARY));
+    auto* lkHint = new QLabel("Green = holds · Orange dashed = waiting for");
+    lkHint->setStyleSheet(QString("color:%1; font-size:10px;").arg(Theme::TEXT_MUTED));
+    lkHdr->addWidget(lkTitle); lkHdr->addStretch(); lkHdr->addWidget(lkHint);
+    lkL->addLayout(lkHdr);
+    lockGraph = new LockGraphView();
+    lockGraph->setMinimumHeight(170);
+    lkL->addWidget(lockGraph);
+    outer->addWidget(lockCard);
 
     // ── Log card ───────────────────────────────────────────────────────────────
     auto* logCard = new QWidget();
@@ -319,23 +481,14 @@ ThreadLab::ThreadLab(QWidget* parent) : QWidget(parent) {
     auto* ll = new QVBoxLayout(logCard);
     ll->setContentsMargins(14, 12, 14, 12);
     ll->setSpacing(6);
-
     auto* logHeader = new QHBoxLayout();
     auto* logTitle = new QLabel("Event Log");
-    logTitle->setStyleSheet(QString(
-        "color:%1; font-size:12px; font-weight:bold;"
-    ).arg(Theme::TEXT_PRIMARY));
-
+    logTitle->setStyleSheet(QString("color:%1; font-size:12px; font-weight:bold;").arg(Theme::TEXT_PRIMARY));
     clearLogBtn = new QPushButton("Clear");
     clearLogBtn->setStyleSheet(Theme::btnGhost());
-    clearLogBtn->setFixedHeight(26);
-    clearLogBtn->setFixedWidth(60);
-
-    logHeader->addWidget(logTitle);
-    logHeader->addStretch();
-    logHeader->addWidget(clearLogBtn);
+    clearLogBtn->setFixedHeight(26); clearLogBtn->setFixedWidth(60);
+    logHeader->addWidget(logTitle); logHeader->addStretch(); logHeader->addWidget(clearLogBtn);
     ll->addLayout(logHeader);
-
     logView = new QTextEdit();
     logView->setReadOnly(true);
     logView->setMinimumHeight(80);
@@ -344,142 +497,228 @@ ThreadLab::ThreadLab(QWidget* parent) : QWidget(parent) {
     ll->addWidget(logView);
     outer->addWidget(logCard);
 
-    // ── Status bar ─────────────────────────────────────────────────────────────
+    // ── Status ────────────────────────────────────────────────────────────────
     statusLabel = new QLabel("Ready — select a demo and spawn a worker process.");
-    statusLabel->setStyleSheet(QString(
-        "color:%1; font-size:11px; padding:2px 0;"
-    ).arg(Theme::TEXT_MUTED));
+    statusLabel->setStyleSheet(QString("color:%1; font-size:11px; padding:2px 0;").arg(Theme::TEXT_MUTED));
     outer->addWidget(statusLabel);
 
-    // ── Connections ────────────────────────────────────────────────────────────
+    // ── Connections ───────────────────────────────────────────────────────────
     connect(spawnBtn,    &QPushButton::clicked, this, &ThreadLab::onSpawnThreads);
     connect(killBtn,     &QPushButton::clicked, this, &ThreadLab::onKillWorker);
     connect(clearLogBtn, &QPushButton::clicked, logView, &QTextEdit::clear);
     connect(demoBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &ThreadLab::onDemoChanged);
+    connect(demoBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int idx) {
+                lockToggle->setVisible(idx == 1);
+            });
 
     refreshTimer = new QTimer(this);
     connect(refreshTimer, &QTimer::timeout, this, &ThreadLab::onRefresh);
     refreshTimer->start(1000);
 
     onDemoChanged(0);
+    lockToggle->setVisible(false);
 }
 
 ThreadLab::~ThreadLab() {
-    if (workerPid > 0) { kill(workerPid, SIGKILL); waitpid(workerPid, nullptr, WNOHANG); }
+    if (workerProc) {
+        workerProc->kill();
+        workerProc->waitForFinished(500);
+    }
 }
 
 void ThreadLab::onDemoChanged(int idx) {
     static const char* exps[] = {
         "<b>CPU Race</b><br><br>"
         "All threads run the same tight CPU loop simultaneously. "
-        "Because they share the same process, the OS scheduler gives each thread "
-        "its own time slice on a different core. You'll see all TIDs show state 'R' — "
-        "they're genuinely running in parallel.<br><br>"
-        "Watch the thread timeline: all bars solid = real parallelism.",
+        "They share the same PID but have unique TIDs in /proc/[pid]/task/. "
+        "Watch all TIDs show state 'R' — real parallelism across cores.",
 
         "<b>Mutex Contention</b><br><br>"
-        "Threads try to acquire the same <code>pthread_mutex_t</code>. "
-        "Only one succeeds — the others block with <code>pthread_mutex_lock()</code> "
-        "and enter the 'S' (sleeping) state. The winner runs, releases the lock, "
-        "and the kernel wakes one waiter.<br><br>"
-        "Watch: only one thread is 'R' at a time despite multiple threads existing.",
+        "Threads fight for a single <code>pthread_mutex_t</code>. "
+        "Only one succeeds — the rest block in <code>futex(FUTEX_WAIT)</code>. "
+        "The kernel puts them in state <b>S</b> (sleeping).<br><br>"
+        "Toggle <b>With Lock</b> off to see the race condition.",
 
         "<b>Producer-Consumer</b><br><br>"
-        "Producer threads fill a shared buffer, consumer threads drain it. "
-        "Coordination via <code>pthread_cond_t</code>. When the buffer is full, "
-        "producers wait. When empty, consumers wait.<br><br>"
-        "This is how thread pools, event loops, and pipelines work.",
+        "Producer threads fill a shared buffer via <code>pthread_cond_t</code>. "
+        "When full, producers wait; when empty, consumers wait. "
+        "State flips between R and S in the timeline.",
 
         "<b>Reader-Writer Lock</b><br><br>"
-        "Multiple reader threads hold <code>pthread_rwlock_rdlock()</code> simultaneously "
-        "— reads are parallel. A writer thread calls <code>pthread_rwlock_wrlock()</code> "
-        "which waits for all readers to finish, then gets exclusive access.<br><br>"
-        "Readers don't block each other. Writers block everyone.",
+        "Multiple readers hold <code>pthread_rwlock_rdlock()</code> simultaneously. "
+        "A writer calls <code>pthread_rwlock_wrlock()</code> — waits for all readers. "
+        "Readers don't block each other; the writer blocks everyone.",
+
+        "<b>Race Condition — No Lock</b><br><br>"
+        "Non-atomic read-modify-write on a shared counter. Increments get lost. "
+        "The counter grows slower than nThreads × rate/s. "
+        "Compare with Mutex Contention (With Lock = on) to see the difference.",
+
+        "<b>Deadlock — ABBA Lock Inversion</b><br><br>"
+        "Thread A acquires mutex_A, then tries mutex_B.<br>"
+        "Thread B acquires mutex_B, then tries mutex_A.<br><br>"
+        "After each holds one lock and waits for the other, "
+        "<b>neither can ever proceed</b>. This is a real pthread deadlock.<br><br>"
+        "Watch the Lock Graph: green arrows = holds, orange dashed = waiting for. "
+        "When the cycle is closed, <b>DEADLOCK DETECTED</b> appears.<br><br>"
+        "The thread state in /proc shows <b>S</b> (sleeping in futex_wait). "
+        "Solution: always acquire locks in the same order (A before B everywhere).",
     };
-    if (idx >= 0 && idx < 4) emit explanationNeeded(exps[idx]);
+    if (idx >= 0 && idx < 6) emit explanationNeeded(exps[idx]);
 }
 
 void ThreadLab::onSpawnThreads() {
-    if (workerPid > 0) {
-        kill(workerPid, SIGKILL);
-        waitpid(workerPid, nullptr, WNOHANG);
+    if (workerProc) {
+        workerProc->kill();
+        workerProc->waitForFinished(500);
+        workerProc->deleteLater();
+        workerProc = nullptr;
         workerPid = -1;
     }
+    lockHolds.clear(); lockWaits.clear();
+    deadTidA = -1; deadTidB = -1;
+    lockGraph->clear();
 
-    int demo    = demoBox->currentIndex();
+    int demo     = demoBox->currentIndex();
     int nThreads = threadCountSpin->value();
 
-    workerPid = fork();
-    if (workerPid == 0) {
-        // Child: try the dedicated worker binary first
-        char countStr[8]; snprintf(countStr, 8, "%d", nThreads);
-        char demoStr[8];  snprintf(demoStr,  8, "%d", demo);
-        execlp("learnos_thread_worker", "learnos_thread_worker", countStr, demoStr, nullptr);
+    // Mutex contention: lock toggle → demo 4 (race) when unchecked
+    bool raceMode = (demo == 1) && lockToggle->isVisible() && !lockToggle->isChecked();
+    if (raceMode) demo = 4;
 
-        // Fallback inline worker
-        nice(19);
-        pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-        auto threadFunc = [](void* arg) -> void* {
-            pthread_mutex_t* m = (pthread_mutex_t*)arg;
-            while (true) {
-                pthread_mutex_lock(m);
-                volatile double x = 1.0;
-                for (int i = 0; i < 100000; i++) x += i;
-                pthread_mutex_unlock(m);
-                usleep(1000);
-            }
-            return nullptr;
-        };
-        std::vector<pthread_t> threads(nThreads);
-        for (int i = 0; i < nThreads; i++)
-            pthread_create(&threads[i], nullptr, threadFunc, &mutex);
-        for (auto& t : threads) pthread_join(t, nullptr);
-        _exit(0);
+    workerProc = new QProcess(this);
+    workerProc->setProcessChannelMode(QProcess::MergedChannels);
+    connect(workerProc, &QProcess::readyRead, this, &ThreadLab::onWorkerOutput);
+    connect(workerProc, QOverload<int,QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [this](int, QProcess::ExitStatus) {
+                logView->append(QString(
+                    "<span style='color:#94A3B8;'>[%1]</span> "
+                    "<span style='color:#FBBF24;'>Worker process exited.</span>")
+                    .arg(QTime::currentTime().toString("hh:mm:ss")));
+                workerPid = -1;
+                spawnBtn->setEnabled(true);
+                killBtn->setEnabled(false);
+                demoBox->setEnabled(true);
+                threadCountSpin->setEnabled(true);
+                lockToggle->setEnabled(true);
+                statPid->setText("—"); statThreads->setText("—");
+                statRunning->setText("—"); counterLabel->setText("—");
+            });
+
+    QString binary = findThreadWorker();
+    workerProc->start(binary, {QString::number(nThreads), QString::number(demo)});
+
+    if (!workerProc->waitForStarted(2000)) {
+        statusLabel->setText("⚠ Could not start learnos_thread_worker — rebuild first.");
+        workerProc->deleteLater();
+        workerProc = nullptr;
+        return;
     }
 
-    if (workerPid > 0) {
-        spawnBtn->setEnabled(false);
-        killBtn->setEnabled(true);
-        demoBox->setEnabled(false);
-        threadCountSpin->setEnabled(false);
-        timeline->clear();
+    spawnBtn->setEnabled(false);
+    killBtn->setEnabled(true);
+    demoBox->setEnabled(false);
+    threadCountSpin->setEnabled(false);
+    lockToggle->setEnabled(false);
+    timeline->clear();
+    counterLabel->setText("0");
 
-        statPid->setText(QString::number(workerPid));
-        statThreads->setText("…");
-        statRunning->setText("…");
+    QString demoName = raceMode ? "Race Condition (no lock)" : demoBox->currentText().left(30);
+    statusLabel->setText(QString("Worker spawning — %1 threads, demo: %2")
+        .arg(nThreads).arg(demoName));
+    logView->append(QString(
+        "<span style='color:#94A3B8;'>[%1]</span> "
+        "<span style='color:#4ADE80;'>Spawned</span> worker — %2 threads, demo: <i>%3</i>")
+        .arg(QTime::currentTime().toString("hh:mm:ss")).arg(nThreads).arg(demoName));
+}
 
-        statusLabel->setText(QString(
-            "Worker PID %1 running — %2 threads").arg(workerPid).arg(nThreads));
+void ThreadLab::onWorkerOutput() {
+    if (!workerProc) return;
+    QByteArray data = workerProc->readAll();
+    for (auto& rawLine : data.split('\n')) {
+        QString line = QString::fromUtf8(rawLine).trimmed();
+        if (line.isEmpty()) continue;
 
-        logView->append(QString(
-            "<span style='color:#94A3B8;'>[%1]</span> "
-            "<span style='color:#4ADE80;'>Spawned</span> worker PID <b>%2</b> — "
-            "%3 thread(s), demo: <i>%4</i>")
-            .arg(QTime::currentTime().toString("hh:mm:ss"))
-            .arg(workerPid).arg(nThreads)
-            .arg(demoBox->currentText().left(24)));
+        if (line.startsWith("READY ")) {
+            workerPid = line.mid(6).toLong();
+            statPid->setText(QString::number(workerPid));
+            statusLabel->setText(QString("Worker PID %1 running").arg(workerPid));
+            logView->append(QString(
+                "<span style='color:#94A3B8;'>[%1]</span> "
+                "<span style='color:#4ADE80;'>Worker ready</span> — PID <b>%2</b>")
+                .arg(QTime::currentTime().toString("hh:mm:ss")).arg(workerPid));
 
-        emit explanationNeeded(QString(
-            "<b>Worker spawned — PID %1</b><br><br>"
-            "The worker created <b>%2 threads</b> using <code>pthread_create()</code>. "
-            "They all share:<br>"
-            "• Same PID in <code>/proc</code><br>"
-            "• Same virtual address space (heap, globals)<br>"
-            "• Same open file descriptors<br><br>"
-            "But each has its own:<br>"
-            "• Thread ID (TID) visible in <code>/proc/%1/task/</code><br>"
-            "• Stack (mapped privately)<br>"
-            "• CPU registers and program counter<br><br>"
-            "This is why threading is fast: no address space copy (unlike fork)."
-        ).arg(workerPid).arg(nThreads));
+            emit explanationNeeded(QString(
+                "<b>Worker spawned — PID %1</b><br><br>"
+                "Threads created with <code>pthread_create()</code>. "
+                "All share the same PID but have unique TIDs.<br><br>"
+                "Thread state is read from:<br>"
+                "<code>/proc/%1/task/[tid]/status → State: S/R/D</code><br><br>"
+                "<b>S (sleeping)</b> = blocked in <code>futex_wait()</code> "
+                "— this is what mutex lock / cond_wait / rwlock look like at the kernel level.<br>"
+                "<b>R (running)</b> = on a CPU right now.<br>"
+                "<b>D (disk wait)</b> = uninterruptible I/O sleep."
+            ).arg(workerPid));
+
+        } else if (line.startsWith("STATUS ")) {
+            auto parts = line.mid(7).split(' ');
+            for (auto& part : parts)
+                if (part.startsWith("counter="))
+                    counterLabel->setText(part.mid(8));
+
+        } else if (line.startsWith("LOCKSTATE ")) {
+            // LOCKSTATE tid=T waits_for=X holds=Y
+            auto parts = line.mid(10).split(' ');
+            long tid = -1;
+            QString holds = "none", waits = "none";
+            for (auto& p : parts) {
+                if (p.startsWith("tid="))        tid   = p.mid(4).toLong();
+                if (p.startsWith("holds="))      holds = p.mid(6);
+                if (p.startsWith("waits_for="))  waits = p.mid(10);
+            }
+            if (tid > 0) {
+                lockHolds[tid] = holds;
+                lockWaits[tid] = waits;
+            }
+
+        } else if (line.startsWith("DEADLOCK_DETECTED ")) {
+            auto parts = line.mid(18).split(' ');
+            for (auto& p : parts) {
+                if (p.startsWith("tid_a=")) deadTidA = p.mid(6).toLong();
+                if (p.startsWith("tid_b=")) deadTidB = p.mid(6).toLong();
+            }
+            lockGraph->setDeadlockDetected(deadTidA, deadTidB);
+            logView->append(QString(
+                "<span style='color:#94A3B8;'>[%1]</span> "
+                "<span style='color:#EF4444; font-weight:bold;'>⚠ DEADLOCK</span> "
+                "— TID %2 ↔ TID %3 (neither can proceed)")
+                .arg(QTime::currentTime().toString("hh:mm:ss"))
+                .arg(deadTidA).arg(deadTidB));
+
+            emit explanationNeeded(QString(
+                "<b>⚠ DEADLOCK DETECTED</b><br><br>"
+                "TID %1 holds <code>mutex_A</code>, waiting for <code>mutex_B</code><br>"
+                "TID %2 holds <code>mutex_B</code>, waiting for <code>mutex_A</code><br><br>"
+                "Both threads are stuck in <code>futex_wait()</code> — their /proc state "
+                "shows <b>S</b>. The kernel has no built-in deadlock detector; they will "
+                "stay blocked until the process is killed.<br><br>"
+                "<b>Cause:</b> ABBA lock ordering — each thread acquires locks in opposite order.<br>"
+                "<b>Fix:</b> Always acquire mutexes in a globally consistent order "
+                "(e.g., always A before B). pthread_mutex_trylock() can also break deadlocks "
+                "at the cost of retry logic."
+            ).arg(deadTidA).arg(deadTidB));
+        }
     }
 }
 
 void ThreadLab::onKillWorker() {
-    if (workerPid <= 0) return;
-    kill(workerPid, SIGKILL);
-    waitpid(workerPid, nullptr, WNOHANG);
+    if (!workerProc) return;
+    workerProc->kill();
+    workerProc->waitForFinished(500);
+    workerProc->deleteLater();
+    workerProc = nullptr;
 
     logView->append(QString(
         "<span style='color:#94A3B8;'>[%1]</span> "
@@ -491,29 +730,36 @@ void ThreadLab::onKillWorker() {
     killBtn->setEnabled(false);
     demoBox->setEnabled(true);
     threadCountSpin->setEnabled(true);
+    lockToggle->setEnabled(true);
     threadTable->setRowCount(0);
-    statPid->setText("—");
-    statThreads->setText("—");
-    statRunning->setText("—");
+    statPid->setText("—"); statThreads->setText("—");
+    statRunning->setText("—"); counterLabel->setText("—");
     statusLabel->setText("Worker killed — ready to spawn again.");
+    lockHolds.clear(); lockWaits.clear();
+    lockGraph->clear();
 }
 
 void ThreadLab::onRefresh() {
-    if (workerPid > 0 && kill(workerPid, 0) != 0) {
-        logView->append(QString(
-            "<span style='color:#94A3B8;'>[%1]</span> "
-            "<span style='color:#FBBF24;'>Worker PID %2 exited on its own.</span>")
-            .arg(QTime::currentTime().toString("hh:mm:ss")).arg(workerPid));
-        workerPid = -1;
-        spawnBtn->setEnabled(true);
-        killBtn->setEnabled(false);
-        demoBox->setEnabled(true);
-        threadCountSpin->setEnabled(true);
-        statPid->setText("—");
-        statThreads->setText("—");
-        statRunning->setText("—");
-    }
+    if (workerPid > 0 && kill(workerPid, 0) != 0) workerPid = -1;
     if (workerPid > 0) refreshTable();
+}
+
+// Read extended futex wait detail from /proc/[pid]/task/[tid]/wchan or status
+QString ThreadLab::readFutexState(pid_t pid, long tid) {
+    // /proc/[pid]/task/[tid]/wchan tells us the kernel function the thread sleeps in
+    char path[256];
+    snprintf(path, sizeof(path), "/proc/%d/task/%ld/wchan", pid, tid);
+    std::ifstream f(path);
+    std::string s;
+    if (std::getline(f, s) && !s.empty()) {
+        if (s == "futex_wait_queue" || s == "futex_wait")   return "futex_wait (mutex/cond)";
+        if (s == "do_wait")                                  return "waitpid()";
+        if (s == "pipe_read" || s == "pipe_wait")           return "pipe_read";
+        if (s == "ep_poll")                                  return "epoll_wait";
+        if (s == "0" || s == "-")                            return "";
+        return QString::fromStdString(s);
+    }
+    return "";
 }
 
 QVector<ThreadInfo> ThreadLab::readThreads(pid_t pid) {
@@ -532,6 +778,8 @@ QVector<ThreadInfo> ThreadLab::readThreads(pid_t pid) {
         ThreadInfo t;
         t.tid   = tid;
         t.alive = true;
+        t.holdsLock    = lockHolds.value(tid, "none");
+        t.waitsForLock = lockWaits.value(tid, "none");
 
         std::ifstream sf(
             QString("/proc/%1/task/%2/status").arg(pid).arg(tid).toStdString());
@@ -546,6 +794,12 @@ QVector<ThreadInfo> ThreadLab::readThreads(pid_t pid) {
                 std::istringstream ss(line.substr(27)); ss >> t.involuntarySwitches;
             }
         }
+
+        // Read wchan for sleeping threads to show futex detail
+        if (t.state == "S") {
+            t.futexState = readFutexState(pid, tid);
+        }
+
         result.append(t);
     }
     closedir(dir);
@@ -558,9 +812,11 @@ void ThreadLab::refreshTable() {
 
     int runCount = 0;
     for (auto& t : threads) if (t.state == "R") runCount++;
-
     statThreads->setText(QString::number(threads.size()));
     statRunning->setText(QString::number(runCount));
+
+    // Update lock graph with current thread info
+    lockGraph->setThreads(threads);
 
     threadTable->setRowCount(0);
     int ci = 0;
@@ -579,24 +835,32 @@ void ThreadLab::refreshTable() {
             t.state == "R" ? "▶ Running" :
             t.state == "S" ? "◌ Sleeping" :
             t.state == "D" ? "⧖ DiskWait" : t.state;
-
         const char* stateColor =
             t.state == "R" ? Theme::GREEN :
             t.state == "S" ? Theme::BLUE  : Theme::ORANGE;
 
-        // Color dot + TID
-        QColor tc = THREAD_PALETTE[ci % 8];
+        // Extended futex detail
+        QString futexDetail = t.futexState.isEmpty() ? "—" : t.futexState;
+
+        // Lock summary
+        QString lockSummary;
+        if (t.holdsLock != "none" || t.waitsForLock != "none") {
+            if (t.holdsLock != "none")    lockSummary += "holds:" + t.holdsLock + " ";
+            if (t.waitsForLock != "none") lockSummary += "waits:" + t.waitsForLock;
+        }
+
         auto* tidItem = new QTableWidgetItem(QString("● %1").arg(t.tid));
         tidItem->setTextAlignment(Qt::AlignCenter);
-        tidItem->setForeground(tc);
-        QFont bold = tidItem->font(); bold.setBold(true);
-        tidItem->setFont(bold);
+        tidItem->setForeground(THREAD_PALETTE[ci % 8]);
+        QFont bold = tidItem->font(); bold.setBold(true); tidItem->setFont(bold);
 
         threadTable->setItem(row, 0, tidItem);
         threadTable->setItem(row, 1, cell(stateLabel, stateColor));
-        threadTable->setItem(row, 2, cell(QString::number(t.voluntarySwitches)));
-        threadTable->setItem(row, 3, cell(QString::number(t.involuntarySwitches)));
-        threadTable->setItem(row, 4, cell("shared"));
+        threadTable->setItem(row, 2, cell(futexDetail, Theme::TEXT_SECONDARY));
+        threadTable->setItem(row, 3, cell(QString::number(t.voluntarySwitches)));
+        threadTable->setItem(row, 4, cell(QString::number(t.involuntarySwitches)));
+        threadTable->setItem(row, 5, cell(lockSummary.trimmed(),
+            !lockSummary.isEmpty() ? Theme::ORANGE : Theme::TEXT_MUTED));
         ci++;
     }
 

@@ -6,6 +6,7 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QComboBox>
+#include <QTextEdit>
 #include <QTimer>
 #include <vector>
 #include <unistd.h>
@@ -48,12 +49,17 @@ private slots:
     void onRowClicked(QListWidgetItem* item);
     void applyScheduling();
     void onZombieReap();
+    void onSeccompDemo();
+    void onCgroupDemo();
 
 private:
     QListWidget* processList;
     QComboBox*   algorithmBox;
+    QTextEdit*   seccompLog;
+    QLabel*      cgroupLabel;
 
     std::vector<SandboxProcess> processes;
+    pid_t seccompDemoPid = -1;
 
     void spawn(WorkloadType type);
     void refreshList();

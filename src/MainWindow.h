@@ -8,7 +8,6 @@
 #include "CpuMemMonitor.h"
 #include "SandboxManager.h"
 #include "AlgorithmStepper.h"
-#include "MemoryInspector.h"
 #include "MemoryLab.h"
 #include "DataStructureLab.h"
 #include "IPCLab.h"
@@ -33,7 +32,6 @@ private:
     CpuMemMonitor*    cpuMemMonitor;
     SandboxManager*   sandboxManager;
     AlgorithmStepper* algoStepper;
-    MemoryInspector*  memInspector;
     MemoryLab*        memoryLab;
     DataStructureLab* dataStructureLab;
     IPCLab*           ipcLab;

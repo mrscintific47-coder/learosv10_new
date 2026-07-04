@@ -138,7 +138,6 @@ void MainWindow::setupUI() {
     cpuMemMonitor    = new CpuMemMonitor();
     sandboxManager   = new SandboxManager();
     algoStepper      = new AlgorithmStepper();
-    memInspector     = new MemoryInspector();
     memoryLab        = new MemoryLab();
     dataStructureLab = new DataStructureLab();
     ipcLab           = new IPCLab();
@@ -155,7 +154,6 @@ void MainWindow::setupUI() {
     tabs->addTab(cpuMemMonitor,    "CPU & RAM");
     tabs->addTab(sandboxManager,   "Sandbox");
     tabs->addTab(algoStepper,      "Scheduler");
-    tabs->addTab(memInspector,     "Mem Map");
     tabs->addTab(memoryLab,        "Mem Lab");
     tabs->addTab(dataStructureLab, "DS Lab");
     tabs->addTab(ipcLab,           "IPC");
@@ -196,7 +194,6 @@ void MainWindow::connectSignals() {
     connect(cpuMemMonitor,    &CpuMemMonitor::explanationNeeded,    ex, &Explainer::setExplanation);
     connect(sandboxManager,   &SandboxManager::explanationNeeded,   ex, &Explainer::setExplanation);
     connect(algoStepper,      &AlgorithmStepper::explanationNeeded, ex, &Explainer::setExplanation);
-    connect(memInspector,     &MemoryInspector::explanationNeeded,  ex, &Explainer::setExplanation);
     connect(memoryLab,        &MemoryLab::explanationNeeded,        ex, &Explainer::setExplanation);
     connect(dataStructureLab, &DataStructureLab::explanationNeeded, ex, &Explainer::setExplanation);
     connect(ipcLab,           &IPCLab::explanationNeeded,           ex, &Explainer::setExplanation);
@@ -215,20 +212,16 @@ void MainWindow::connectSignals() {
     connect(sandboxManager, &SandboxManager::processesChanged,
             signalPanel,    &SignalPanel::setSandboxPids);
 
-    // Sandbox process selected → inspect memory map AND load process stack in DS Lab
+    // Sandbox process selected → load process stack in DS Lab
     connect(sandboxManager, &SandboxManager::processSelected,
             this, [this](pid_t pid) {
-                // Update Mem Map (tab index 4)
-                memInspector->inspectPid(pid);
-                // Load process stack in DS Lab without switching tab
                 dataStructureLab->loadProcessStack(pid);
             });
 
-    // Click a process in ProcessViewer → jump to Memory Map tab
+    // Click a process in ProcessViewer → jump to Mem Lab tab (now index 4)
     connect(processViewer, &ProcessViewer::pidSelected,
-            this, [this](pid_t pid) {
-                tabs->setCurrentIndex(4);
-                memInspector->inspectPid(pid);
+            this, [this](pid_t) {
+                tabs->setCurrentIndex(4); // Mem Lab tab
             });
 
     // Signal fired at a sandbox PID → notify Sandbox so it can remove dead processes.

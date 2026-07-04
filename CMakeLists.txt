@@ -55,6 +55,15 @@ else()
     message(STATUS "libsystemd not found — journal feed disabled (install libsystemd-dev to enable)")
 endif()
 
+# -lrt for POSIX mqueue (mq_open) and shm_open/shm_unlink
+find_library(RT_LIB rt)
+if(RT_LIB)
+    target_link_libraries(LearnOS ${RT_LIB})
+    message(STATUS "librt found — POSIX mqueue and shm_open enabled")
+else()
+    message(STATUS "librt not found — POSIX mqueue/shm_open may not link")
+endif()
+
 # Worker binaries — built alongside the main binary and placed next to it
 add_executable(memlab_worker tools/memlab_worker.cpp)
 set_target_properties(memlab_worker PROPERTIES
@@ -64,6 +73,16 @@ add_executable(dslab_worker tools/dslab_worker.cpp)
 set_target_properties(dslab_worker PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:LearnOS>)
 
+add_executable(learnos_thread_worker tools/thread_worker.cpp)
+target_link_libraries(learnos_thread_worker Threads::Threads)
+set_target_properties(learnos_thread_worker PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:LearnOS>)
+
+add_executable(sched_worker tools/sched_worker.cpp)
+target_link_libraries(sched_worker Threads::Threads)
+set_target_properties(sched_worker PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:LearnOS>)
+
 # Install targets
-install(TARGETS LearnOS memlab_worker dslab_worker
+install(TARGETS LearnOS memlab_worker dslab_worker learnos_thread_worker sched_worker
     RUNTIME DESTINATION bin)

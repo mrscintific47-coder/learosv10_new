@@ -5,6 +5,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QTextCursor>
+#include <QRegularExpression>
 #include <fstream>
 #include <sstream>
 #include <cstring>
@@ -158,6 +159,7 @@ EbpfLab::EbpfLab(QWidget* parent) : QWidget(parent) {
     probeBox->addItem("sys_enter_write — every write() syscall");
     probeBox->addItem("sys_enter_mmap — every mmap() syscall");
     probeBox->addItem("kmalloc — every kernel malloc");
+    probeBox->addItem("raw_syscalls:sys_enter — ALL syscalls (flamegraph aggregation)");
     probeBox->setStyleSheet(Theme::input());
     ftraceL->addWidget(probeBox);
 
@@ -417,7 +419,7 @@ QString EbpfLab::enableFtrace(const QString& probe) {
     }
 
     int idx = probeBox->currentIndex();
-    const char* ev = (idx >= 0 && idx < 5) ? events[idx] : events[0];
+    const char* ev = (idx >= 0 && idx < 6) ? events[idx] : events[0];
     qint64 written = setEvent.write(ev);
     setEvent.close();
     if (written <= 0) {
@@ -514,14 +516,101 @@ void EbpfLab::onStopFtrace() {
 
 void EbpfLab::onFtraceReady() {
     if (tracePipeFd < 0) return;
-    char buf[4096];
+    char buf[8192];
     ssize_t n = read(tracePipeFd, buf, sizeof(buf)-1);
     if (n <= 0) return;
     buf[n] = '\0';
-    // Append to log, keep last 200 lines
+
     QString text = QString::fromLocal8Bit(buf);
+
+    // For raw_syscalls mode: aggregate syscall IDs into a frequency table
+    // and display as a flamegraph-style sorted bar list instead of raw lines.
+    bool isRawSyscalls = (probeBox->currentIndex() == 5);
+    if (isRawSyscalls) {
+        // Parse lines like: ... sys_enter: NR=N ...
+        // ftrace raw_syscalls format: "  proc-PID [CPU] ... sys_enter: NR N args..."
+        static QMap<int, long> syscallFreq;
+        static const char* x86_64_syscalls[] = {
+            "read","write","open","close","stat","fstat","lstat","poll","lseek","mmap",
+            "mprotect","munmap","brk","rt_sigaction","rt_sigprocmask","rt_sigreturn","ioctl",
+            "pread64","pwrite64","readv","writev","access","pipe","select","sched_yield",
+            "mremap","msync","mincore","madvise","shmget","shmat","shmctl","dup","dup2",
+            "pause","nanosleep","getitimer","alarm","setitimer","getpid","sendfile","socket",
+            "connect","accept","sendto","recvfrom","sendmsg","recvmsg","shutdown","bind",
+            "listen","getsockname","getpeername","socketpair","setsockopt","getsockopt",
+            "clone","fork","vfork","execve","exit","wait4","kill","uname","semget","semop",
+            "semctl","shmdt","msgget","msgsnd","msgrcv","msgctl","fcntl","flock","fsync",
+            "fdatasync","truncate","ftruncate","getdents","getcwd","chdir","fchdir","rename",
+            "mkdir","rmdir","creat","link","unlink","symlink","readlink","chmod","fchmod",
+            "chown","fchown","lchown","umask","gettimeofday","getrlimit","getrusage",
+            "sysinfo","times","ptrace","getuid","syslog","getgid","setuid","setgid",
+            "geteuid","getegid","setpgid","getppid","getpgrp","setsid","setreuid",
+            "setregid","getgroups","setgroups","setresuid","getresuid","setresgid",
+            "getresgid","getpgid","setfsuid","setfsgid","getsid","capget","capset",
+            "rt_sigpending","rt_sigtimedwait","rt_sigqueueinfo","rt_sigsuspend",
+            "sigaltstack","utime","mknod","uselib","personality","ustat","statfs",
+            "fstatfs","sysfs","getpriority","setpriority","sched_setparam",
+            "sched_getparam","sched_setscheduler","sched_getscheduler","sched_get_priority_max",
+            "sched_get_priority_min","sched_rr_get_interval","mlock","munlock","mlockall",
+            "munlockall","vhangup","modify_ldt","pivot_root","_sysctl","prctl","arch_prctrl",
+            "adjtimex","setrlimit","chroot","sync","acct","settimeofday","mount","umount2",
+            "swapon","swapoff","reboot","sethostname","setdomainname","iopl","ioperm",
+            "create_module","init_module","delete_module","get_kernel_syms","query_module",
+            "quotactl","nfsservctl","getpmsg","putpmsg","afs_syscall","tuxcall","security",
+            "gettid","readahead","setxattr","lsetxattr","fsetxattr","getxattr","lgetxattr",
+            "fgetxattr","listxattr","llistxattr","flistxattr","removexattr","lremovexattr",
+            "fremovexattr","tkill","time","futex","sched_setaffinity","sched_getaffinity"
+        };
+        constexpr int N_SYSCALLS = sizeof(x86_64_syscalls)/sizeof(*x86_64_syscalls);
+
+        for (auto& line : text.split('\n')) {
+            // Look for "NR N" or "nr=N" or "id=N" in the line
+            int nrIdx = line.indexOf(" NR=");
+            if (nrIdx < 0) nrIdx = line.indexOf(" id=");
+            if (nrIdx < 0) {
+                // Try to find the NR field from sched raw format: "sys_enter: NR 59 ..."
+                // ftrace format has "sys_enter: NR 59" etc.
+                int seIdx = line.indexOf("sys_enter: NR ");
+                if (seIdx >= 0) {
+                    QString rest = line.mid(seIdx + 14);
+                    bool ok; int nr = rest.split(' ').first().toInt(&ok);
+                    if (ok) syscallFreq[nr]++;
+                }
+                continue;
+            }
+            QString rest = line.mid(nrIdx + 4);
+            bool ok; int nr = rest.split(QRegularExpression("[^0-9]")).first().toInt(&ok);
+            if (ok && nr >= 0) syscallFreq[nr]++;
+        }
+
+        // Build flamegraph-style HTML sorted by frequency
+        if (!syscallFreq.isEmpty()) {
+            // Sort by count descending
+            QVector<QPair<int,long>> sorted;
+            for (auto it = syscallFreq.begin(); it != syscallFreq.end(); ++it)
+                sorted.append({it.key(), it.value()});
+            std::sort(sorted.begin(), sorted.end(), [](auto& a, auto& b){ return a.second > b.second; });
+            long maxCount = sorted.first().second;
+
+            QString html = "<b>Syscall Frequency (top 20)</b><br>";
+            int shown = 0;
+            for (auto& [nr, cnt] : sorted) {
+                if (++shown > 20) break;
+                int barW = (int)(200.0 * cnt / maxCount);
+                const char* name = (nr >= 0 && nr < N_SYSCALLS) ? x86_64_syscalls[nr] : "unknown";
+                html += QString("<code>%1</code> [%2]  ")
+                    .arg(QString(name).leftJustified(20))
+                    .arg(QString::number(cnt).rightJustified(8));
+                html += QString("<span style='background:#4F6EF7;display:inline-block;width:%1px;height:8px;'>&nbsp;</span>").arg(barW);
+                html += "<br>";
+            }
+            traceLog->setHtml(html);
+            return;  // don't append raw lines for raw_syscalls mode
+        }
+    }
+
+    // Normal mode: append raw lines
     traceLog->append(text.trimmed());
-    // Trim log
     QStringList lines = traceLog->toPlainText().split('\n');
     if (lines.size() > 200) {
         traceLog->setPlainText(lines.mid(lines.size()-200).join('\n'));

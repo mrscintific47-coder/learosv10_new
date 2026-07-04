@@ -6,14 +6,14 @@
 #include <QSpinBox>
 #include <QPainter>
 #include <QMouseEvent>
+#include <QTimer>
 #include <vector>
 #include "MemoryLabDriver.h"
+#include "MemoryInspector.h"
 
-// Custom-painted strip showing the real arena: a horizontal bar split into
+// Custom-painted strip showing the arena: a horizontal bar split into
 // blocks, used blocks colored by a hash of their id, free space light gray.
-// Clicking a used block frees it (with a confirm-by-color flash, no popup —
-// keeps the "experiment freely" feel while the Reset button is the real
-// safety net for anything destructive).
+// Clicking a used block frees it.
 class ArenaView : public QWidget {
     Q_OBJECT
 public:
@@ -48,18 +48,29 @@ private slots:
     void onCommandFailed(QString reason);
     void onWorkerDied();
     void onWorkerReady(long capacityBytes);
+    void onWorkerPidKnown(pid_t pid);
     void onBlockClicked(int id);
     void onResetClicked();
     void onRestartClicked();
+    void onMapRefresh();
+    void onMprotectClicked();
+    void onMadviseClicked();
+    void onCowForkClicked();
 
 private:
     MemoryLabDriver* driver;
-    ArenaView*  arenaView;
-    QSpinBox*   sizeSpin;
-    QComboBox*  strategyBox;
-    QLabel*     statsLabel;
-    QLabel*     statusLabel;
-    long        capacityBytes = 0;
+    ArenaView*    arenaView;
+    MemMapWidget* mapView;
+    QTimer*       mapTimer;
+    QSpinBox*     sizeSpin;
+    QComboBox*    strategyBox;
+    QComboBox*    mprotectBox;   // RO / RW / NONE
+    QComboBox*    madviseBox;    // DONTNEED / WILLNEED
+    QLabel*       statsLabel;
+    QLabel*       statusLabel;
+    QLabel*       smapsLabel;    // shows smaps diff after mprotect/madvise/COW
+    long          capacityBytes = 0;
 
     void updateStatsLabel(const ArenaSummary& s);
+    void refreshSmapsDiff();     // reads /proc/pid/smaps_rollup and shows delta
 };

@@ -40,6 +40,11 @@ class MemoryInspector : public QWidget {
 public:
     explicit MemoryInspector(QWidget* parent = nullptr);
     void inspectPid(pid_t pid);
+
+    // Static so other labs can reuse without owning a MemoryInspector instance.
+    static std::vector<MemRegion> readMemMap(pid_t pid);
+    static long readRSS(pid_t pid);
+
 signals:
     void explanationNeeded(QString text);
 private slots:
@@ -51,7 +56,4 @@ private:
     QLabel*      statsLabel;
     QTimer*      refreshTimer;
     pid_t        currentPid = -1;
-
-    std::vector<MemRegion> readMemMap(pid_t pid);
-    long readRSS(pid_t pid);
 };

@@ -1,6 +1,7 @@
 #pragma once
 #include <QWidget>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPushButton>
 #include <QTableWidget>
 #include <QTextEdit>
@@ -11,6 +12,7 @@
 #include <QPainter>
 #include <vector>
 #include <unistd.h>
+#include <sched.h>
 
 struct NsInfo {
     QString type;       // pid, uts, net, mnt, ipc, user
@@ -46,17 +48,22 @@ private slots:
     void onKillChild();
     void onNsTypeChanged(int index);
     void onRefresh();
+    void onRunInNamespace();
 
 private:
-    pid_t childPid = -1;
+    pid_t  childPid   = -1;
+    void*  childStack = nullptr;  // heap-allocated stack for clone() child
 
     // UI
     QComboBox*    nsTypeBox;
     QPushButton*  spawnBtn;
     QPushButton*  killBtn;
+    QLabel*       innerPidLabel;  // shows child's own getpid() result
     NsTreeView*   treeView;
     QTableWidget* nsTable;
     QTextEdit*    logView;
+    QLineEdit*    cmdInput;
+    QPushButton*  runInNsBtn;
     QLabel*       statusLabel;
     QTimer*       refreshTimer;
 

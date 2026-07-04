@@ -16,7 +16,7 @@
 #include <sys/types.h>
 
 struct IPCChannel {
-    enum Type { Pipe, SharedMem, UnixSocket };
+    enum Type { Pipe, SharedMem, UnixSocket, PosixShm, MessageQueue };
     Type        type;
     std::string name;
     pid_t       senderPid   = -1;
@@ -31,13 +31,14 @@ struct IPCChannel {
     int         serverFd    = -1;
     int         clientFd    = -1;
     std::string socketPath;
+    // POSIX shm_open
+    int         posixShmFd  = -1;
+    void*       posixShmPtr = nullptr;
+    std::string posixShmName;
+    // POSIX message queue
+    int         mqFd        = -1;   // mqd_t stored as int
+    std::string mqName;
 
-    // Message framing: every Send prefixes the payload with a 4-byte length
-    // header so discrete Sends stay discrete on Read, even though the
-    // underlying pipe/socket is just a raw byte stream. rawRecvBuffer holds
-    // whatever undecoded bytes have been pulled off the fd so far; Read()
-    // peels off at most ONE complete frame per click and leaves the rest
-    // buffered for the next click.
     std::string rawRecvBuffer;
 };
 
@@ -70,6 +71,8 @@ private slots:
     void createPipe();
     void createSharedMem();
     void createSocket();
+    void createPosixShm();
+    void createMessageQueue();
     void sendData();
     void readData();
     void destroySelected();

@@ -7,12 +7,15 @@
 #include <QScrollArea>
 #include <sys/wait.h>
 #include <sys/shm.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <mqueue.h>
 #include <signal.h>
 #include <fcntl.h>
 #include <cstring>
 #include <cstdlib>
+#include <cerrno>
 #include <fstream>
 #include <sstream>
 #include <algorithm>
@@ -228,9 +231,23 @@ IPCLab::IPCLab(QWidget* parent) : QWidget(parent) {
         "border-radius:8px;padding:8px 14px;font-size:12px;font-weight:bold;}"
         "QPushButton:hover{background:#CCFBF1;}");
 
+    auto* posixShmBtn = new QPushButton("📦  POSIX shm_open");
+    posixShmBtn->setStyleSheet(
+        "QPushButton{background:#F0FDF4;color:#16A34A;border:1px solid #BBF7D0;"
+        "border-radius:8px;padding:8px 14px;font-size:12px;font-weight:bold;}"
+        "QPushButton:hover{background:#DCFCE7;}");
+
+    auto* mqBtn = new QPushButton("📨  POSIX mq_open");
+    mqBtn->setStyleSheet(
+        "QPushButton{background:#FFF7ED;color:#C2410C;border:1px solid #FED7AA;"
+        "border-radius:8px;padding:8px 14px;font-size:12px;font-weight:bold;}"
+        "QPushButton:hover{background:#FFEDD5;}");
+
     btnRow->addWidget(pipeBtn);
     btnRow->addWidget(shmBtn);
     btnRow->addWidget(sockBtn);
+    btnRow->addWidget(posixShmBtn);
+    btnRow->addWidget(mqBtn);
     createLayout->addLayout(btnRow);
     outer->addWidget(createCard);
 
@@ -310,6 +327,8 @@ IPCLab::IPCLab(QWidget* parent) : QWidget(parent) {
     connect(pipeBtn,    &QPushButton::clicked, this, &IPCLab::createPipe);
     connect(shmBtn,     &QPushButton::clicked, this, &IPCLab::createSharedMem);
     connect(sockBtn,    &QPushButton::clicked, this, &IPCLab::createSocket);
+    connect(posixShmBtn, &QPushButton::clicked, this, &IPCLab::createPosixShm);
+    connect(mqBtn,      &QPushButton::clicked, this, &IPCLab::createMessageQueue);
     connect(sendBtn,    &QPushButton::clicked, this, &IPCLab::sendData);
     connect(readBtn,    &QPushButton::clicked, this, &IPCLab::readData);
     connect(destroyBtn, &QPushButton::clicked, this, &IPCLab::destroySelected);
@@ -678,6 +697,25 @@ void IPCLab::sendData() {
         dataLog->append(QString("[SHM ✎] Wrote to 0x%1: \"%2\"")
             .arg((quintptr)ch.shmPtr,0,16).arg(data));
         EventBus::get().ipcDataSent(QString::fromStdString(ch.name), bytes.size());
+    } else if (ch.type == IPCChannel::PosixShm && ch.posixShmPtr) {
+        strncpy((char*)ch.posixShmPtr, bytes.constData(), ch.shmSize-1);
+        ((char*)ch.posixShmPtr)[ch.shmSize-1] = '\0';
+        ch.bytesSent += bytes.size();
+        dataLog->append(QString("[POSIX SHM ✎] Wrote %1B to /dev/shm: \"%2\"")
+            .arg(bytes.size()).arg(data));
+    } else if (ch.type == IPCChannel::MessageQueue && ch.mqFd >= 0) {
+        // mq_send is O_NONBLOCK — if queue full, returns EAGAIN to show blocking behavior
+        int r = mq_send((mqd_t)ch.mqFd, bytes.constData(), (size_t)bytes.size(), 0);
+        if (r == 0) {
+            ch.bytesSent += bytes.size();
+            dataLog->append(QString("[MQ →] Sent %1B prio=0: \"%2\"")
+                .arg(bytes.size()).arg(data));
+        } else {
+            int err = errno;
+            dataLog->append(QString("[MQ →] mq_send failed: %1%2")
+                .arg(strerror(err))
+                .arg(err == EAGAIN ? " — QUEUE FULL (all 8 message slots used — writer blocks in real blocking mode)" : ""));
+        }
     } else if (ch.type == IPCChannel::UnixSocket) {
         // Lazily establish (or re-establish) the parent's persistent connection
         if (ch.clientFd < 0) {
@@ -735,12 +773,24 @@ void IPCLab::readData() {
             dataLog->append("[PIPE] Nothing to read yet — waiting for a full message");
         }
     } else if (ch.type == IPCChannel::SharedMem && ch.shmPtr) {
-        // Read current shm content — treat it as a single "receive" of whatever
-        // is currently in the segment.  We set bytesRecv = bytesSent so the
-        // counter reflects "all sent data has been read" after a Read click.
         QString content = QString::fromLocal8Bit((char*)ch.shmPtr, strnlen((char*)ch.shmPtr, ch.shmSize));
-        ch.bytesRecv = ch.bytesSent;   // snapshot: received == what was last sent
+        ch.bytesRecv = ch.bytesSent;
         dataLog->append(QString("[SHM ←] Current content: \"%1\"").arg(content.left(80)));
+    } else if (ch.type == IPCChannel::PosixShm && ch.posixShmPtr) {
+        QString content = QString::fromLocal8Bit((char*)ch.posixShmPtr, strnlen((char*)ch.posixShmPtr, ch.shmSize));
+        ch.bytesRecv = ch.bytesSent;
+        dataLog->append(QString("[POSIX SHM ←] Current content: \"%1\"").arg(content.left(80)));
+    } else if (ch.type == IPCChannel::MessageQueue && ch.mqFd >= 0) {
+        char buf[256] = {}; unsigned int prio = 0;
+        ssize_t n = mq_receive((mqd_t)ch.mqFd, buf, sizeof(buf) - 1, &prio);
+        if (n > 0) {
+            buf[n] = '\0';
+            ch.bytesRecv += (int)n;
+            dataLog->append(QString("[MQ ←] Received %1B prio=%2: \"%3\"")
+                .arg(n).arg(prio).arg(QString::fromLocal8Bit(buf, (int)n)));
+        } else {
+            dataLog->append("[MQ] Queue empty (EAGAIN) — send a message first");
+        }
     } else if (ch.type == IPCChannel::UnixSocket) {
         if (ch.clientFd < 0) {
             dataLog->append("[SOCK] Nothing to read — click Send first to open a connection");
@@ -819,6 +869,18 @@ void IPCLab::killChannel(int idx) {
         if (ch.clientFd >= 0) { ::close(ch.clientFd); ch.clientFd = -1; }
         if (ch.serverFd >= 0) { ::close(ch.serverFd); ch.serverFd = -1; }
         if (!ch.socketPath.empty()) unlink(ch.socketPath.c_str());
+    } else if (ch.type == IPCChannel::PosixShm) {
+        if (ch.posixShmPtr && ch.posixShmPtr != MAP_FAILED) {
+            munmap(ch.posixShmPtr, (size_t)ch.shmSize);
+        }
+        if (ch.posixShmFd >= 0) { ::close(ch.posixShmFd); }
+        if (!ch.posixShmName.empty()) shm_unlink(ch.posixShmName.c_str());
+    } else if (ch.type == IPCChannel::MessageQueue) {
+        if (ch.mqFd >= 0) {
+            mq_close((mqd_t)ch.mqFd);
+            ch.mqFd = -1;
+        }
+        if (!ch.mqName.empty()) mq_unlink(ch.mqName.c_str());
     }
     ch.alive = false;
 }
@@ -863,7 +925,9 @@ void IPCLab::refreshTable() {
             return i;
         };
         QString typeName = ch.type==IPCChannel::Pipe?"📡 Pipe":
-                           ch.type==IPCChannel::SharedMem?"💾 SHM":"🔗 Socket";
+                           ch.type==IPCChannel::SharedMem?"💾 SHM":
+                           ch.type==IPCChannel::UnixSocket?"🔗 Socket":
+                           ch.type==IPCChannel::PosixShm?"📦 POSIX SHM":"📨 Msg Queue";
         QString aliveStr = ch.alive ? "" : " ✕";
         channelTable->setItem(row,0,cell(typeName + aliveStr,
             ch.alive ? (ch.type==IPCChannel::Pipe?Theme::BLUE:
@@ -911,4 +975,139 @@ void IPCLab::explainChannel(const IPCChannel& ch) {
         ).arg(QString::fromStdString(ch.socketPath)).arg(ch.senderPid).arg(ch.receiverPid);
     }
     emit explanationNeeded(explain);
+}
+
+// ── POSIX shm_open + mmap ─────────────────────────────────────────────────────
+// Creates a named shared memory object via shm_open() and maps it MAP_SHARED.
+// Both parent and a spawned child process map the same physical pages — any
+// write from one is immediately visible to the other without a copy.
+void IPCLab::createPosixShm() {
+    const int   SHM_SIZE = 4096;
+    std::string name = "/learnos_posixshm_" + std::to_string(getpid())
+                     + "_" + std::to_string(channels.size());
+
+    // Create and size the shared memory object
+    int fd = shm_open(name.c_str(), O_CREAT | O_RDWR | O_TRUNC, 0600);
+    if (fd < 0) {
+        statusLabel->setText(QString("shm_open() failed: %1").arg(strerror(errno)));
+        return;
+    }
+    if (ftruncate(fd, SHM_SIZE) != 0) {
+        ::close(fd); shm_unlink(name.c_str());
+        statusLabel->setText(QString("ftruncate() failed: %1").arg(strerror(errno)));
+        return;
+    }
+    void* ptr = mmap(nullptr, SHM_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (ptr == MAP_FAILED) {
+        ::close(fd); shm_unlink(name.c_str());
+        statusLabel->setText(QString("mmap() failed: %1").arg(strerror(errno)));
+        return;
+    }
+    memset(ptr, 0, SHM_SIZE);
+
+    IPCChannel ch;
+    ch.type        = IPCChannel::PosixShm;
+    ch.name        = "posix_shm_" + std::to_string(channels.size()+1);
+    ch.posixShmFd  = fd;
+    ch.posixShmPtr = ptr;
+    ch.posixShmName= name;
+    ch.shmSize     = SHM_SIZE;
+    ch.alive       = true;
+
+    // Spawn a reader child that polls the shared region and prints what it sees
+    pid_t childPid = fork();
+    if (childPid == 0) {
+        // Remap the same shm object (already have ptr, but remap to be self-contained)
+        volatile char* p = (volatile char*)ptr;
+        while (true) {
+            if (p[0] != 0) {
+                // data present — just keep looping to simulate a reader
+            }
+            usleep(50000); // 50ms poll
+        }
+        _exit(0);
+    }
+
+    ch.senderPid   = getpid();
+    ch.receiverPid = childPid;
+    channels.push_back(ch);
+    workers.push_back({getpid(), childPid});
+    selectedChannel = (int)channels.size()-1;
+
+    refreshTable();
+    flowView->setChannels(channels);
+    dataLog->append(QString("[POSIX SHM] Created %1 — %2 bytes at 0x%3")
+        .arg(QString::fromStdString(name)).arg(SHM_SIZE)
+        .arg((quintptr)ptr, 0, 16));
+
+    emit explanationNeeded(QString(
+        "<b>POSIX Shared Memory — shm_open() + mmap(MAP_SHARED)</b><br><br>"
+        "Name: <code>%1</code> (visible in <code>/dev/shm/</code>)<br>"
+        "Size: %2 bytes<br>"
+        "Mapped at: <code>0x%3</code><br><br>"
+        "<b>How it works:</b><br>"
+        "1. <code>shm_open(\"%1\", O_CREAT|O_RDWR)</code> creates a file in the "
+        "kernel's shared memory filesystem (tmpfs backed)<br>"
+        "2. <code>ftruncate(fd, %2)</code> sizes it<br>"
+        "3. <code>mmap(MAP_SHARED)</code> maps the same physical pages into this "
+        "process's virtual address space — writes are immediately visible to any "
+        "other process that maps the same name<br><br>"
+        "Unlike SYSV shmget(), POSIX shm uses a file-like namespace. "
+        "Run <code>ls /dev/shm/</code> in a terminal to see it."
+    ).arg(QString::fromStdString(name)).arg(SHM_SIZE)
+     .arg((quintptr)ptr, 0, 16));
+}
+
+// ── POSIX message queue — mq_open ─────────────────────────────────────────────
+// Creates a POSIX MQ. O_NONBLOCK is set so that mq_send() returns EAGAIN
+// immediately when the queue is full — students can see what "blocking" means.
+void IPCLab::createMessageQueue() {
+    std::string name = "/learnos_mq_" + std::to_string(getpid())
+                     + "_" + std::to_string(channels.size());
+
+    struct mq_attr attr = {};
+    attr.mq_flags   = 0;
+    attr.mq_maxmsg  = 8;   // hold up to 8 messages
+    attr.mq_msgsize = 256; // each up to 256 bytes
+
+    // O_NONBLOCK so mq_send returns EAGAIN when full (demonstrates blocking semantics)
+    mqd_t mqd = mq_open(name.c_str(), O_CREAT | O_RDWR | O_NONBLOCK, 0600, &attr);
+    if (mqd == (mqd_t)-1) {
+        statusLabel->setText(QString("mq_open() failed: %1").arg(strerror(errno)));
+        return;
+    }
+
+    IPCChannel ch;
+    ch.type   = IPCChannel::MessageQueue;
+    ch.name   = "mq_" + std::to_string(channels.size()+1);
+    ch.mqFd   = (int)mqd;
+    ch.mqName = name;
+    ch.alive  = true;
+    ch.senderPid   = getpid();
+    ch.receiverPid = getpid(); // same process — no child needed for MQ demo
+
+    channels.push_back(ch);
+    workers.push_back({getpid(), -1});
+    selectedChannel = (int)channels.size()-1;
+
+    refreshTable();
+    flowView->setChannels(channels);
+    dataLog->append(QString("[MQ] Created %1 — maxmsg=8, msgsize=256, O_NONBLOCK")
+        .arg(QString::fromStdString(name)));
+
+    emit explanationNeeded(QString(
+        "<b>POSIX Message Queue — mq_open()</b><br><br>"
+        "Name: <code>%1</code><br>"
+        "Max messages: 8  |  Max message size: 256 bytes<br>"
+        "Flag: <code>O_NONBLOCK</code><br><br>"
+        "<b>How it works:</b><br>"
+        "1. <code>mq_open(\"%1\", O_CREAT|O_RDWR|O_NONBLOCK, 0600, &attr)</code><br>"
+        "2. <code>mq_send()</code> enqueues up to 8 messages with a priority<br>"
+        "3. <code>mq_receive()</code> dequeues highest-priority message first<br><br>"
+        "<b>O_NONBLOCK demo:</b> Click Send 8 times to fill the queue. The 9th "
+        "click returns <code>EAGAIN</code> — in blocking mode the sender would "
+        "sleep until a receiver dequeues a message. This is the kernel enforcing "
+        "backpressure without busy-waiting.<br><br>"
+        "Run <code>ls /dev/mqueue/</code> to see the queue file."
+    ).arg(QString::fromStdString(name)));
 }

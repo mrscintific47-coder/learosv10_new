@@ -33,6 +33,7 @@ static QString findWorkerBinary() {
 void MemoryLabDriver::start() {
     if (proc->state() != QProcess::NotRunning) return;
     buffer.clear();
+    pidVal = -1;
     proc->start(findWorkerBinary(), {});
 }
 
@@ -40,6 +41,7 @@ void MemoryLabDriver::stop() {
     if (proc->state() == QProcess::NotRunning) return;
     proc->kill();
     proc->waitForFinished(500);
+    pidVal = -1;
 }
 
 bool MemoryLabDriver::isRunning() const {
@@ -66,6 +68,18 @@ void MemoryLabDriver::writeBlock(int id, int byteVal) {
     send(QString("WRITE %1 %2").arg(id).arg(byteVal));
 }
 
+void MemoryLabDriver::mprotect(long id, const QString& perm) {
+    send(QString("MPROTECT %1 %2").arg(id).arg(perm));
+}
+
+void MemoryLabDriver::madvise(long id, const QString& advice) {
+    send(QString("MADVISE %1 %2").arg(id).arg(advice));
+}
+
+void MemoryLabDriver::cowFork() {
+    send("COW_FORK");
+}
+
 void MemoryLabDriver::resetArena() {
     send("RESET");
 }
@@ -86,6 +100,13 @@ void MemoryLabDriver::processLine(const QString& line) {
     if (line.startsWith("READY")) {
         long cap = line.section(' ', 1, 1).toLong();
         emit workerReady(cap);
+        // Ask the worker for its PID so the GUI can point MemMapWidget at it.
+        send("GETPID");
+        return;
+    }
+    if (line.startsWith("WORKERPID")) {
+        pidVal = (pid_t)line.section(' ', 1, 1).toLong();
+        emit workerPidKnown(pidVal);
         return;
     }
     if (line.startsWith("BLOCK")) {
@@ -97,8 +118,18 @@ void MemoryLabDriver::processLine(const QString& line) {
             b.size     = parts[3].toLong();
             b.used     = parts[4].toInt() != 0;
             b.fillByte = parts[5].toInt();
+            if (b.used) lastBlock = b.id;
             pendingBlocks.push_back(b);
         }
+        return;
+    }
+    if (line == "SIGSEGV_TRIGGERED") {
+        emit commandFailed("SIGSEGV triggered (caught by sigaction handler) — page fault on write to protected page");
+        return;
+    }
+    if (line.startsWith("COWFORK")) {
+        // Just forward as a status message
+        emit commandFailed("COW fork: " + line.mid(7).trimmed());
         return;
     }
     if (line.startsWith("ARENA")) {

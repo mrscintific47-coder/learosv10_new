@@ -169,6 +169,18 @@ KernelParamsPanel::KernelParamsPanel(QWidget* parent) : QWidget(parent) {
             schedLatencySlider, schedLatencyVal, 1, 50,
             (int)(ExperimentManager::get().readSchedLatency()/1000000));
 
+    // Inline explainer so the sched_latency slider isn't a mystery.
+    {
+        auto* desc = new QLabel(
+            "Target time before the scheduler reconsiders which thread runs next — "
+            "lower = more responsive, higher = more throughput.");
+        desc->setWordWrap(true);
+        desc->setStyleSheet(QString(
+            "color:%1; font-size:10px; padding:0 2px 6px 2px;"
+        ).arg(Theme::TEXT_MUTED));
+        layout->addWidget(desc);
+    }
+
     // Overcommit
     auto* ocRow = new QWidget();
     ocRow->setStyleSheet(QString("background:white;border-radius:8px;border:1px solid %1;").arg(Theme::BORDER));

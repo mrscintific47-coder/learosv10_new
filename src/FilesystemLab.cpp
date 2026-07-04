@@ -26,40 +26,41 @@ InotifyEventLog::InotifyEventLog(QWidget* parent) : QTextEdit(parent) {
 
 void InotifyEventLog::addEvent(const InotifyEvent& ev) {
     static const QMap<QString,QString> colors = {
-        {"CREATE",  "#22C55E"},
-        {"DELETE",  "#EF4444"},
-        {"MODIFY",  "#F97316"},
-        {"OPEN",    "#4F6EF7"},
-        {"CLOSE",   "#94A3B8"},
+        {"CREATE",     "#22C55E"},
+        {"DELETE",     "#EF4444"},
+        {"MODIFY",     "#F97316"},
+        {"OPEN",       "#4F6EF7"},
+        {"CLOSE",      "#94A3B8"},
+        {"CLOSE_W",    "#60A5FA"},
         {"MOVED_FROM", "#A855F7"},
         {"MOVED_TO",   "#14B8A6"},
-        {"ATTRIB",  "#EAB308"},
+        {"ATTRIB",     "#EAB308"},
     };
     QString color = colors.value(ev.eventType, "#94A3B8");
-    QString html = QString(
-        "<span style='color:#64748B;'>%1</span> "
-        "<span style='color:%2;font-weight:bold;'>%-12s</span> "
-        "<span style='color:#e2e8f0;'>%3/%4</span>"
-    ).arg(ev.timestamp)
+    QString name  = ev.name.isEmpty() ? QString() : ("/" + ev.name);
+    QString html  = QString(
+        "<span style='color:#64748B;'>%1</span>&nbsp;"
+        "<span style='color:%2;font-weight:bold;'>%3</span>&nbsp;"
+        "<span style='color:#e2e8f0;'>%4%5</span>"
+    ).arg(ev.timestamp.toHtmlEscaped())
      .arg(color)
-     .arg(ev.path)
-     .arg(ev.name.isEmpty() ? QString() : ev.name);
-    // Use plain text for performance
-    append(QString("[%1] %-12s %2/%3")
-        .arg(ev.timestamp)
-        .arg(ev.eventType.leftJustified(12, ' '))
-        .arg(ev.path)
-        .arg(ev.name));
+     .arg(ev.eventType.leftJustified(12, ' ').toHtmlEscaped())
+     .arg(ev.path.toHtmlEscaped())
+     .arg(name.toHtmlEscaped());
+
+    moveCursor(QTextCursor::End);
+    insertHtml(html + "<br>");
 
     eventCount++;
-    // Keep last 500 lines
-    QStringList lines = toPlainText().split('\n');
-    if (lines.size() > 500) {
-        setPlainText(lines.mid(lines.size()-500).join('\n'));
+    // Keep last 500 lines — trim by block count to avoid full re-parse
+    if (eventCount > 500) {
         QTextCursor c = textCursor();
-        c.movePosition(QTextCursor::End);
-        setTextCursor(c);
+        c.movePosition(QTextCursor::Start);
+        c.movePosition(QTextCursor::Down, QTextCursor::KeepAnchor, eventCount - 500);
+        c.removeSelectedText();
+        eventCount = 500;
     }
+    moveCursor(QTextCursor::End);
 }
 
 // ── FilesystemLab ─────────────────────────────────────────────────────────────
@@ -171,6 +172,9 @@ FilesystemLab::FilesystemLab(QWidget* parent) : QWidget(parent) {
     connect(inotifyTimer, &QTimer::timeout, this, &FilesystemLab::onInotifyReady);
 
     buildProcTree();
+
+    // Auto-start watching /tmp so events are visible immediately on first open.
+    onWatchPath();
 }
 
 FilesystemLab::~FilesystemLab() {
@@ -257,6 +261,8 @@ void FilesystemLab::onInotifyReady() {
 }
 
 void FilesystemLab::onCreateFile() {
+    // Ensure a watch is active so the event is always visible in the log.
+    if (inotifyFd < 0) onWatchPath();
     if (watchedPath.isEmpty()) watchedPath = "/tmp";
     QString path = watchedPath + "/learnos_test_" +
                    QString::number(QDateTime::currentMSecsSinceEpoch() % 10000);
@@ -269,6 +275,8 @@ void FilesystemLab::onCreateFile() {
 }
 
 void FilesystemLab::onDeleteFile() {
+    // Ensure a watch is active so the DELETE event is captured.
+    if (inotifyFd < 0) onWatchPath();
     // Delete the most recently created test file
     QDir dir(watchedPath.isEmpty() ? "/tmp" : watchedPath);
     QStringList files = dir.entryList({"learnos_test_*"}, QDir::Files, QDir::Time);

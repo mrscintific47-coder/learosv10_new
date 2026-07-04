@@ -37,15 +37,22 @@ public:
     void alloc(long size, const QString& strategy);
     void freeBlock(int id);
     void writeBlock(int id, int byteVal);
+    void mprotect(long id, const QString& perm);
+    void madvise(long id, const QString& advice);
+    void cowFork();
     void resetArena();
 
     bool isRunning() const;
+
+    pid_t workerPid() const { return pidVal; }
+    long  lastBlockId() const { return lastBlock; }  // last allocated/live block id
 
 signals:
     void arenaUpdated(std::vector<ArenaBlock> blocks, ArenaSummary summary);
     void commandFailed(QString reason);
     void workerDied();
     void workerReady(long capacityBytes);
+    void workerPidKnown(pid_t pid);  // emitted once after GETPID response
 
 private slots:
     void onReadyRead();
@@ -53,7 +60,9 @@ private slots:
     void onProcessFinished(int exitCode, QProcess::ExitStatus status);
 
 private:
-    QProcess* proc = nullptr;
+    QProcess* proc      = nullptr;
+    pid_t     pidVal    = -1;
+    long      lastBlock = -1;   // track last known live block id
     QByteArray buffer;
     std::vector<ArenaBlock> pendingBlocks;
 

@@ -48,6 +48,7 @@ private slots:
     void onTargetSelected(int row, int col);
     void onSpawnTarget();
     void onKillTarget();
+    void onAsyncDemo();
 
 private:
     // Signal definitions
@@ -58,19 +59,23 @@ private:
     QTableWidget* processTable;
     QTextEdit*    signalLog;
     QLabel*       signalDescLabel;
+    QLabel*       signalMaskLabel;   // shows SigPnd/SigBlk/SigCgt from /proc
     QLabel*       statusLabel;
     QPushButton*  sendBtn;
     QPushButton*  spawnBtn;
     QPushButton*  killBtn;
+    QPushButton*  asyncDemoBtn;      // async-signal-safety bug demo
     QTimer*       refreshTimer;
 
     // State
     std::vector<pid_t>    sandboxPids;
-    std::vector<pid_t>    ownTargets;   // processes we spawned here
+    std::vector<pid_t>    ownTargets;
     std::vector<SignalEvent> eventLog;
     pid_t selectedPid = -1;
+    pid_t asyncDemoPid = -1;   // process running the async-signal-safety demo
 
     void refreshProcessTable();
     void logEvent(int signum, pid_t pid, const QString& result);
     QString processState(pid_t pid);
+    void readSignalMasks(pid_t pid);   // reads /proc/[pid]/status bitmasks
 };
