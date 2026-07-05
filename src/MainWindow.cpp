@@ -1,7 +1,6 @@
 #include "MainWindow.h"
 #include "Theme.h"
 #include "EventBus.h"
-#include "ExperimentManager.h"
 #include <QStatusBar>
 #include <QLabel>
 #include <QScrollArea>
@@ -142,7 +141,6 @@ void MainWindow::setupUI() {
     dataStructureLab = new DataStructureLab();
     ipcLab           = new IPCLab();
     signalPanel      = new SignalPanel();
-    experimentLab    = new ExperimentLab();
     threadLab        = new ThreadLab();
     namespaceLab     = new NamespaceLab();
     ebpfLab          = new EbpfLab();
@@ -158,7 +156,6 @@ void MainWindow::setupUI() {
     tabs->addTab(dataStructureLab, "DS Lab");
     tabs->addTab(ipcLab,           "IPC");
     tabs->addTab(signalPanel,      "Signals");
-    tabs->addTab(experimentLab,    "Experiments");
     tabs->addTab(threadLab,        "Threads");
     tabs->addTab(namespaceLab,     "Namespaces");
     tabs->addTab(ebpfLab,          "Observability");
@@ -198,9 +195,7 @@ void MainWindow::connectSignals() {
     connect(dataStructureLab, &DataStructureLab::explanationNeeded, ex, &Explainer::setExplanation);
     connect(ipcLab,           &IPCLab::explanationNeeded,           ex, &Explainer::setExplanation);
     connect(signalPanel,      &SignalPanel::explanationNeeded,       ex, &Explainer::setExplanation);
-    connect(experimentLab,    &ExperimentLab::explanationNeeded,    ex, &Explainer::setExplanation);
     connect(heatMap,          &HeatMap::explanationNeeded,          ex, &Explainer::setExplanation);
-    connect(&ExperimentManager::get(), &ExperimentManager::explanationNeeded, ex, &Explainer::setExplanation);
     connect(threadLab,        &ThreadLab::explanationNeeded,        ex, &Explainer::setExplanation);
     connect(namespaceLab,     &NamespaceLab::explanationNeeded,     ex, &Explainer::setExplanation);
     connect(ebpfLab,          &EbpfLab::explanationNeeded,          ex, &Explainer::setExplanation);
@@ -212,10 +207,11 @@ void MainWindow::connectSignals() {
     connect(sandboxManager, &SandboxManager::processesChanged,
             signalPanel,    &SignalPanel::setSandboxPids);
 
-    // Sandbox process selected → load process stack in DS Lab
+    // Sandbox process selected → load process stack in DS Lab + show memory map
     connect(sandboxManager, &SandboxManager::processSelected,
             this, [this](pid_t pid) {
                 dataStructureLab->loadProcessStack(pid);
+                memoryLab->showMemMapForPid(pid);
             });
 
     // Click a process in ProcessViewer → jump to Mem Lab tab (now index 4)
@@ -225,10 +221,17 @@ void MainWindow::connectSignals() {
             });
 
     // Signal fired at a sandbox PID → notify Sandbox so it can remove dead processes.
-    // We use the EventBus so SignalPanel doesn't need a direct pointer to SandboxManager.
     connect(&EventBus::get(), &EventBus::osEvent,
             this, [this](const OSEvent& e) {
                 if (e.type == OSEvent::SignalSent && e.pid > 0)
                     sandboxManager->checkProcessAlive(e.pid);
             });
+
+    // ── Lazy-start MemoryLab worker the first time its tab is shown ───────────
+    // Mem Lab tab is index 4. Starting the worker here (not in MemoryLab ctor)
+    // prevents an extra process from being spawned on application launch.
+    connect(tabs, &QTabWidget::currentChanged, this, [this](int idx) {
+        // Mem Lab is at fixed index 4
+        if (idx == 4) memoryLab->ensureStarted();
+    });
 }

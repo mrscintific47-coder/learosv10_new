@@ -271,7 +271,47 @@ MemoryLab::MemoryLab(QWidget* parent) : QWidget(parent) {
     connect(restartBtn, &QPushButton::clicked, this, &MemoryLab::onRestartClicked);
     connect(arenaView,  &ArenaView::blockClicked, this, &MemoryLab::onBlockClicked);
 
-    driver->start();
+    // Worker is NOT started here — only when the Mem Lab tab is first shown.
+    // See ensureStarted() called from MainWindow::connectSignals().
+}
+
+void MemoryLab::ensureStarted() {
+    if (!driver->isRunning()) {
+        statusLabel->setText("Starting worker…");
+        driver->start();
+    }
+}
+
+void MemoryLab::showMemMapForPid(pid_t pid) {
+    // Show the memory map of an external PID (sandbox process) directly.
+    // Pin displayedSandboxPid so the periodic worker-map refresh doesn't overwrite it.
+    if (pid <= 0) return;
+    auto regions = MemoryInspector::readMemMap(pid);
+    if (regions.empty()) {
+        statusLabel->setText(QString("No memory map available for PID %1 (process may have ended)").arg(pid));
+        return;
+    }
+    displayedSandboxPid = pid;          // pin: suppress worker-map refresh
+    long totalKB = 0;
+    for (auto& r : regions) totalKB += r.sizeKB;
+    mapView->setRegions(regions, totalKB);
+    statusLabel->setText(QString("Showing memory map of sandbox PID %1 — %2 regions, %3 KB total  [click Refresh to return to worker map]")
+        .arg(pid).arg(regions.size()).arg(totalKB));
+
+    emit explanationNeeded(QString(
+        "<b>Memory Map — Sandbox PID %1</b><br><br>"
+        "Showing <b>%2</b> virtual memory regions from <code>/proc/%1/maps</code>.<br>"
+        "Total mapped: <b>%3 KB</b><br><br>"
+        "<b>Regions:</b><br>"
+        "• <span style='color:#4F6EF7;'>■</span> Anonymous (heap / mmap)<br>"
+        "• <span style='color:#22C55E;'>■</span> Stack<br>"
+        "• <span style='color:#F97316;'>■</span> Shared libs (.so)<br>"
+        "• <span style='color:#A855F7;'>■</span> [vdso] / special<br><br>"
+        "This is the real kernel view of the process's virtual address space. "
+        "Click a region in the strip to see its permissions and label.<br><br>"
+        "Switch to the <b>Mem Lab</b> worker to experiment with <code>mmap()</code>, "
+        "<code>mprotect()</code> and <code>madvise()</code> on dedicated test blocks."
+    ).arg(pid).arg(regions.size()).arg(totalKB));
 }
 
 MemoryLab::~MemoryLab() {
@@ -280,12 +320,14 @@ MemoryLab::~MemoryLab() {
 }
 
 void MemoryLab::onAllocateClicked() {
+    displayedSandboxPid = -1;   // user is interacting with worker — unpin sandbox view
     long size = sizeSpin->value();
     QString strategy = strategyBox->currentData().toString();
     driver->alloc(size, strategy);
 }
 
 void MemoryLab::onBlockClicked(int id) {
+    displayedSandboxPid = -1;   // unpin sandbox view
     driver->freeBlock(id);
 }
 
@@ -299,6 +341,7 @@ void MemoryLab::onResetClicked() {
 }
 
 void MemoryLab::onRestartClicked() {
+    displayedSandboxPid = -1;   // return to worker map view
     mapTimer->stop();
     statusLabel->setText("Restarting worker…");
     driver->stop();
@@ -346,7 +389,8 @@ void MemoryLab::onArenaUpdated(std::vector<ArenaBlock> blocks, ArenaSummary summ
 }
 
 void MemoryLab::onMapRefresh() {
-    pid_t pid = driver->workerPid();
+    // If a sandbox PID is pinned, refresh that instead of the worker.
+    pid_t pid = (displayedSandboxPid > 0) ? displayedSandboxPid : driver->workerPid();
     if (pid <= 0) return;
 
     auto regions = MemoryInspector::readMemMap(pid);

@@ -1,56 +1,31 @@
 #pragma once
 #include <QWidget>
+#include <QTimer>
 #include <QLabel>
 #include <QPushButton>
+#include <QSlider>
 #include <QComboBox>
-#include <QSpinBox>
 #include <QTableWidget>
-#include <QTextEdit>
-#include <QTimer>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
-#include <QGridLayout>
-#include <QPainter>
-#include <QProcess>
 #include <vector>
+#include <deque>
 #include <unistd.h>
 
-// ── Live Gantt chart ─────────────────────────────────────────────────────────
-// Shows sampled /proc data: one column per sample tick, one row per TID.
-// Color-filled = real "R" state from /proc; faded = sleeping/waiting.
-class SchedGanttView : public QWidget {
-    Q_OBJECT
-public:
-    explicit SchedGanttView(QWidget* parent = nullptr);
-
-    struct TidSample {
-        long    tid;
-        QString policy;   // OTHER / FIFO / RR / DEADLINE
-        int     priority; // sched_priority
-        int     nice;
-        long    utime;
-        long    stime;
-        long    switches;
-        QString state;    // R / S / D etc. from /proc/stat
-    };
-
-    void addSample(const QVector<TidSample>& tids);
-    void clear();
-
-protected:
-    void paintEvent(QPaintEvent*) override;
-
-private:
-    struct Tick { QVector<TidSample> tids; };
-    QVector<Tick>  history;
-    QVector<long>  knownTids;
-    QMap<long,QColor> colors;
-    static const QColor PALETTE[];
+// One process in the scheduler simulation
+struct SchedProcess {
+    pid_t       pid;
+    QString     name;
+    int         priority;    // nice value
+    int         burstLeft;   // remaining CPU ticks
+    int         waitTime;
+    int         state;       // 0=ready 1=running 2=done
+    QColor      color;
 };
 
-// ── AlgorithmStepper  (now "Scheduler Lab") ──────────────────────────────────
 class AlgorithmStepper : public QWidget {
     Q_OBJECT
+
 public:
     explicit AlgorithmStepper(QWidget* parent = nullptr);
     void loadProcesses(const std::vector<pid_t>& pids);
@@ -60,34 +35,38 @@ signals:
     void applyNice(pid_t pid, int nice);
 
 private slots:
-    void onSpawnWorker();
-    void onKillWorker();
-    void onPolicyChanged(int idx);
-    void onWorkerOutput();
-    void onSampleTick();
+    void stepOnce();
+    void toggleAutoPlay();
+    void onAlgoChanged(const QString& algo);
+    void onSpeedChanged(int val);
 
 private:
-    // Worker process
-    QProcess* workerProc = nullptr;
-    pid_t     workerPid  = -1;
-    QTimer*   sampleTimer = nullptr;
-
     // UI
-    QComboBox*    policyBox;
-    QSpinBox*     threadSpin;
-    QPushButton*  spawnBtn;
-    QPushButton*  killBtn;
-    QTableWidget* tidTable;
-    SchedGanttView* ganttView;
-    QTextEdit*    logView;
+    QComboBox*    algoBox;
+    QTableWidget* processTable;
+    QLabel*       tickLabel;
+    QLabel*       procCountLbl;
     QLabel*       statusLabel;
-    QLabel*       statPid;
-    QLabel*       statPolicy;
-    QLabel*       statThreads;
+    QPushButton*  stepBtn;
+    QPushButton*  playBtn;
+    QSlider*      speedSlider;
+    QLabel*       ganttLabel;   // shows recent CPU assignments as colored text
 
-    // Latest sample
-    QVector<SchedGanttView::TidSample> latestSamples;
+    // State
+    QTimer*                  autoTimer;
+    int                      tick;
+    int                      quantum;        // for Round Robin
+    int                      currentSlot;   // index into readyQueue for RR
+    std::vector<SchedProcess> allProcs;
+    std::deque<int>           readyQueue;   // indices into allProcs
+    QString                  ganttHistory;  // last 20 assignments
 
-    void refreshTable(const QVector<SchedGanttView::TidSample>& samples);
-    QVector<SchedGanttView::TidSample> parseSamples();
+    void resetScheduler();
+    void stepFCFS();
+    void stepRR();
+    void stepPriority();
+    void stepSJF();
+    void refreshTable();
+    void appendGantt(const QString& name, const QColor& color);
+    QColor processColor(int index);
 };

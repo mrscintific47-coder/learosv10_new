@@ -1,170 +1,23 @@
 #include "AlgorithmStepper.h"
 #include "Theme.h"
 #include <QHeaderView>
-#include <QPainterPath>
-#include <QTime>
-#include <QFileInfo>
-#include <QCoreApplication>
-#include <QScrollBar>
-#include <fstream>
-#include <sstream>
-#include <dirent.h>
+#include <QFont>
 #include <sys/resource.h>
 #include <signal.h>
+#include <fstream>
+#include <sstream>
 #include <algorithm>
+#include <cmath>
 
-// ── Palette ───────────────────────────────────────────────────────────────────
-const QColor SchedGanttView::PALETTE[] = {
+static QColor COLORS[] = {
     QColor("#4F6EF7"), QColor("#22C55E"), QColor("#F97316"),
     QColor("#A855F7"), QColor("#EF4444"), QColor("#14B8A6"),
     QColor("#EAB308"), QColor("#EC4899")
 };
 
-// ── SchedGanttView ────────────────────────────────────────────────────────────
-
-SchedGanttView::SchedGanttView(QWidget* p) : QWidget(p) {
-    setMinimumHeight(160);
-    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    setStyleSheet(QString(
-        "background:#0F172A; border-radius:10px; border:1px solid %1;"
-    ).arg(Theme::BORDER));
-}
-
-void SchedGanttView::clear() {
-    history.clear(); knownTids.clear(); colors.clear(); update();
-}
-
-void SchedGanttView::addSample(const QVector<TidSample>& tids) {
-    // Register new TIDs
-    int ci = knownTids.size();
-    for (auto& s : tids) {
-        if (!knownTids.contains(s.tid)) {
-            knownTids.append(s.tid);
-            colors[s.tid] = PALETTE[ci % 8];
-            ci++;
-        }
-    }
-    Tick t;
-    t.tids = tids;
-    history.append(t);
-    if (history.size() > 80) history.removeFirst();
-    update();
-}
-
-void SchedGanttView::paintEvent(QPaintEvent*) {
-    QPainter p(this);
-    p.setRenderHint(QPainter::Antialiasing);
-
-    QPainterPath bg;
-    bg.addRoundedRect(rect(), 10, 10);
-    p.fillPath(bg, QColor("#0F172A"));
-
-    if (history.isEmpty() || knownTids.isEmpty()) {
-        p.setPen(QColor("#475569"));
-        p.setFont(QFont("Segoe UI", 10));
-        p.drawText(rect(), Qt::AlignCenter,
-            "Live Gantt timeline will appear when a worker is running.\n"
-            "Solid bar = thread is RUNNING (sampled from /proc/[tid]/stat).");
-        return;
-    }
-
-    int w = width(), h = height();
-    int numT   = knownTids.size();
-    int labelW = 90;
-    int topPad = 10;
-    int botPad = 18;
-    int chartH = h - topPad - botPad;
-    int rowH   = std::max(14, chartH / numT);
-    int chartW = w - labelW - 8;
-    float tickW = history.size() > 0 ? (float)chartW / history.size() : 8.f;
-
-    // Grid lines
-    p.setPen(QPen(QColor("#1E293B"), 1));
-    for (int i = 0; i <= numT; i++) {
-        int y = topPad + i * rowH;
-        p.drawLine(labelW, y, w - 6, y);
-    }
-
-    for (int i = 0; i < numT; i++) {
-        long tid = knownTids[i];
-        int y = topPad + i * rowH;
-
-        // Alternating row
-        if (i % 2 == 0) p.fillRect(QRect(labelW, y, chartW, rowH), QColor(255,255,255,5));
-
-        // Label
-        p.setPen(colors[tid].lighter(130));
-        p.setFont(QFont("Consolas", 8, QFont::Bold));
-        p.drawText(QRect(4, y, labelW - 6, rowH),
-                   Qt::AlignVCenter | Qt::AlignRight,
-                   QString("T%1").arg(tid));
-    }
-
-    // Draw tick bars colored by real /proc state
-    for (int t = 0; t < history.size(); t++) {
-        for (auto& sample : history[t].tids) {
-            int i = knownTids.indexOf(sample.tid);
-            if (i < 0) continue;
-
-            int y  = topPad + i * rowH + 2;
-            int x  = labelW + (int)(t * tickW);
-            int bw = std::max(1, (int)tickW - 1);
-            QRect bar(x, y, bw, rowH - 4);
-
-            QPainterPath bp;
-            bp.addRoundedRect(bar, 2, 2);
-
-            bool running = (sample.state == "R");
-            if (running) {
-                p.fillPath(bp, colors[sample.tid]);
-            } else {
-                QColor c = colors[sample.tid]; c.setAlpha(30);
-                p.fillPath(bp, c);
-            }
-        }
-    }
-
-    // Bottom legend
-    int lx = labelW + 4, ly = h - 6;
-    p.setFont(QFont("Segoe UI", 7));
-    // Running swatch
-    p.fillRect(lx, ly - 8, 10, 8, QColor("#4F6EF7"));
-    p.setPen(QColor("#94A3B8"));
-    p.drawText(lx + 13, ly, "Running (R)");
-    QColor sc("#4F6EF7"); sc.setAlpha(35);
-    p.fillRect(lx + 90, ly - 8, 10, 8, sc);
-    p.drawText(lx + 103, ly, "Sleeping/Waiting");
-}
-
-// ── helpers ───────────────────────────────────────────────────────────────────
-
-static QString findSchedWorker() {
-    QString appDir = QCoreApplication::applicationDirPath();
-    QStringList c = {
-        appDir + "/sched_worker",
-        appDir + "/tools/sched_worker",
-        appDir + "/../tools/sched_worker",
-    };
-    for (auto& p : c) if (QFileInfo::exists(p)) return p;
-    return appDir + "/sched_worker";
-}
-
-// Read state of one task from /proc/[pid]/task/[tid]/stat
-static QString readTidState(pid_t pid, long tid) {
-    char path[256];
-    snprintf(path, sizeof(path), "/proc/%d/task/%ld/stat", pid, tid);
-    std::ifstream f(path);
-    if (!f.is_open()) return "?";
-    std::string line;
-    std::getline(f, line);
-    size_t rp = line.rfind(')');
-    if (rp == std::string::npos || rp + 2 >= line.size()) return "?";
-    return QString(line[rp + 2]);
-}
-
-// ── AlgorithmStepper ─────────────────────────────────────────────────────────
-
-AlgorithmStepper::AlgorithmStepper(QWidget* parent) : QWidget(parent) {
+AlgorithmStepper::AlgorithmStepper(QWidget* parent)
+    : QWidget(parent), tick(0), quantum(3), currentSlot(0)
+{
     setStyleSheet(QString("background:%1;").arg(Theme::BG_APP));
     auto* outer = new QVBoxLayout(this);
     outer->setContentsMargins(16, 16, 16, 16);
@@ -172,11 +25,11 @@ AlgorithmStepper::AlgorithmStepper(QWidget* parent) : QWidget(parent) {
 
     // ── Title row ─────────────────────────────────────────────────────────────
     auto* titleRow = new QHBoxLayout();
-    auto* title = new QLabel("⚙  Scheduler Lab — Real Kernel Scheduling");
+    auto* title = new QLabel("⚙  Scheduling Algorithm Stepper");
     title->setStyleSheet(QString(
         "color:%1; font-size:14px; font-weight:bold;"
     ).arg(Theme::TEXT_PRIMARY));
-    auto* chip = new QLabel("● REAL sched_setscheduler()");
+    auto* chip = new QLabel("● SIMULATOR");
     chip->setStyleSheet(QString(
         "color:%1; background:%2; border-radius:8px; padding:3px 10px;"
         "font-size:10px; font-weight:bold;"
@@ -187,11 +40,8 @@ AlgorithmStepper::AlgorithmStepper(QWidget* parent) : QWidget(parent) {
     outer->addLayout(titleRow);
 
     auto* hint = new QLabel(
-        "Spawns a real worker process and calls <code>sched_setscheduler()</code> / "
-        "<code>sched_setattr()</code> to set the kernel policy. "
-        "Each sample reads <b>/proc/[pid]/task/[tid]/stat</b> for real "
-        "<code>utime</code>, <code>stime</code>, <code>priority</code>, and thread state. "
-        "The Gantt chart is built from actual kernel observations — not simulation.");
+        "Load sandbox processes, then step through FCFS, Round Robin, Priority, or SJF. "
+        "Watch the Gantt chart grow and see which process runs each tick.");
     hint->setWordWrap(true);
     hint->setStyleSheet(QString(
         "background:%1; color:%2; border:1px solid %3;"
@@ -206,56 +56,60 @@ AlgorithmStepper::AlgorithmStepper(QWidget* parent) : QWidget(parent) {
     ctrlL->setContentsMargins(16, 12, 16, 12);
     ctrlL->setSpacing(10);
 
-    auto mkLbl = [&](const QString& t) {
-        auto* l = new QLabel(t);
+    auto mkLabel = [&](const QString& txt) -> QLabel* {
+        auto* l = new QLabel(txt);
         l->setStyleSheet(QString("color:%1; font-size:11px; font-weight:600;")
             .arg(Theme::TEXT_SECONDARY));
         return l;
     };
+    ctrlL->addWidget(mkLabel("Algorithm"), 0, 0);
+    ctrlL->addWidget(mkLabel(""),          0, 1);
+    ctrlL->addWidget(mkLabel(""),          0, 2);
+    ctrlL->addWidget(mkLabel("Speed"),     0, 3);
 
-    ctrlL->addWidget(mkLbl("Scheduling Policy"), 0, 0);
-    ctrlL->addWidget(mkLbl("Thread Count"),       0, 1);
-    ctrlL->addWidget(mkLbl(""),                   0, 2);
-    ctrlL->addWidget(mkLbl(""),                   0, 3);
+    algoBox = new QComboBox();
+    algoBox->addItems({
+        "FCFS — First Come First Served",
+        "Round Robin  (quantum = 3 ticks)",
+        "Priority — lowest nice value wins",
+        "SJF — Shortest Job First"
+    });
+    algoBox->setStyleSheet(Theme::input());
 
-    policyBox = new QComboBox();
-    policyBox->addItem("SCHED_OTHER  — CFS / nice-based (default)",       "OTHER");
-    policyBox->addItem("SCHED_FIFO   — Real-time, no preemption           (needs root/CAP_SYS_NICE)", "FIFO");
-    policyBox->addItem("SCHED_RR     — Real-time, round-robin timeslice   (needs root/CAP_SYS_NICE)", "RR");
-    policyBox->addItem("SCHED_DEADLINE — EDF, per-thread deadline/period  (needs root/CAP_SYS_NICE)", "DEADLINE");
-    policyBox->addItem("SCHED_BATCH  — Low-priority background batch jobs", "BATCH");
-    policyBox->addItem("SCHED_IDLE   — Lowest priority, runs only when idle", "IDLE");
-    policyBox->setStyleSheet(Theme::input());
+    stepBtn = new QPushButton("▶ Step");
+    stepBtn->setStyleSheet(Theme::btnPrimary());
+    stepBtn->setMinimumHeight(32);
 
-    threadSpin = new QSpinBox();
-    threadSpin->setRange(2, 8);
-    threadSpin->setValue(4);
-    threadSpin->setStyleSheet(Theme::input());
+    playBtn = new QPushButton("⏵ Auto Play");
+    playBtn->setStyleSheet(Theme::btnSuccess());
+    playBtn->setMinimumHeight(32);
 
-    spawnBtn = new QPushButton("▶  Spawn Worker");
-    spawnBtn->setStyleSheet(Theme::btnPrimary());
-    spawnBtn->setMinimumHeight(34);
+    auto* resetBtn = new QPushButton("↺ Reset");
+    resetBtn->setStyleSheet(Theme::btnGhost());
+    resetBtn->setMinimumHeight(32);
 
-    killBtn = new QPushButton("✕  Kill Worker");
-    killBtn->setStyleSheet(Theme::btnDanger());
-    killBtn->setMinimumHeight(34);
-    killBtn->setEnabled(false);
+    speedSlider = new QSlider(Qt::Horizontal);
+    speedSlider->setRange(100, 2000);
+    speedSlider->setValue(800);
+    speedSlider->setStyleSheet(Theme::slider(Theme::PURPLE));
 
-    ctrlL->addWidget(policyBox,   1, 0);
-    ctrlL->addWidget(threadSpin,  1, 1);
-    ctrlL->addWidget(spawnBtn,    1, 2);
-    ctrlL->addWidget(killBtn,     1, 3);
+    ctrlL->addWidget(algoBox,     1, 0);
+    ctrlL->addWidget(stepBtn,     1, 1);
+    ctrlL->addWidget(playBtn,     1, 2);
+    ctrlL->addWidget(speedSlider, 1, 3);
+    ctrlL->addWidget(resetBtn,    2, 0);
     ctrlL->setColumnStretch(0, 3);
     ctrlL->setColumnStretch(1, 1);
     ctrlL->setColumnStretch(2, 1);
-    ctrlL->setColumnStretch(3, 1);
+    ctrlL->setColumnStretch(3, 2);
     outer->addWidget(ctrl);
 
-    // ── Stats row ─────────────────────────────────────────────────────────────
-    auto* statsRow = new QHBoxLayout();
-    statsRow->setSpacing(10);
+    // ── Tick stat row ─────────────────────────────────────────────────────────
+    auto* statRow = new QHBoxLayout();
+    statRow->setSpacing(10);
 
-    auto mkStat = [&](const QString& label, QLabel*& vout, const char* accent) {
+    auto mkStatCard = [&](const QString& label, QLabel*& valueOut,
+                          const char* accent) -> QWidget* {
         auto* card = new QWidget();
         card->setStyleSheet(QString(
             "background:white; border-radius:10px; border:1px solid %1;"
@@ -264,391 +118,362 @@ AlgorithmStepper::AlgorithmStepper(QWidget* parent) : QWidget(parent) {
         vl->setContentsMargins(14, 10, 14, 10);
         vl->setSpacing(2);
         auto* lbl = new QLabel(label);
-        lbl->setStyleSheet(QString("color:%1; font-size:10px; font-weight:600;").arg(Theme::TEXT_MUTED));
-        vout = new QLabel("—");
-        vout->setStyleSheet(QString("color:%1; font-size:18px; font-weight:700;").arg(accent));
-        vl->addWidget(lbl); vl->addWidget(vout);
+        lbl->setStyleSheet(QString("color:%1; font-size:10px; font-weight:600;")
+            .arg(Theme::TEXT_MUTED));
+        valueOut = new QLabel("0");
+        valueOut->setStyleSheet(QString("color:%1; font-size:20px; font-weight:700;")
+            .arg(accent));
+        vl->addWidget(lbl);
+        vl->addWidget(valueOut);
         return card;
     };
 
-    statsRow->addWidget(mkStat("Worker PID",    statPid,     Theme::BLUE));
-    statsRow->addWidget(mkStat("Policy",        statPolicy,  Theme::PURPLE));
-    statsRow->addWidget(mkStat("Live Threads",  statThreads, Theme::GREEN));
-    outer->addLayout(statsRow);
+    statRow->addWidget(mkStatCard("Current Tick",    tickLabel,   Theme::PURPLE));
+    statRow->addWidget(mkStatCard("Processes Loaded", procCountLbl, Theme::BLUE));
+    outer->addLayout(statRow);
 
-    // ── TID table ─────────────────────────────────────────────────────────────
+    // ── Process table ─────────────────────────────────────────────────────────
     auto* tableCard = new QWidget();
     tableCard->setStyleSheet(Theme::card());
     auto* tl = new QVBoxLayout(tableCard);
     tl->setContentsMargins(14, 12, 14, 12);
     tl->setSpacing(6);
+    auto* tableTitle = new QLabel("Process Queue");
+    tableTitle->setStyleSheet(QString(
+        "color:%1; font-size:12px; font-weight:bold;"
+    ).arg(Theme::TEXT_PRIMARY));
+    tl->addWidget(tableTitle);
 
-    auto* tblHdr = new QHBoxLayout();
-    auto* tblTitle = new QLabel("Live Thread Table  —  sampled from /proc/[pid]/task/[tid]/stat");
-    tblTitle->setStyleSheet(QString("color:%1; font-size:12px; font-weight:bold;").arg(Theme::TEXT_PRIMARY));
-    tblHdr->addWidget(tblTitle);
-    tl->addLayout(tblHdr);
-
-    tidTable = new QTableWidget(0, 7);
-    tidTable->setHorizontalHeaderLabels({"TID","State","Policy","Sched Prio","Nice","utime","Context Switches"});
-    tidTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-    tidTable->verticalHeader()->setVisible(false);
-    tidTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    tidTable->setAlternatingRowColors(true);
-    tidTable->setShowGrid(false);
-    tidTable->setMinimumHeight(110);
-    tidTable->setMaximumHeight(180);
-    tidTable->setStyleSheet(Theme::table());
-    tl->addWidget(tidTable);
+    processTable = new QTableWidget(0, 5);
+    processTable->setHorizontalHeaderLabels({"PID","Name","Priority","Burst Left","State"});
+    processTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    processTable->verticalHeader()->setVisible(false);
+    processTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    processTable->setAlternatingRowColors(true);
+    processTable->setShowGrid(false);
+    processTable->setMinimumHeight(100);
+    processTable->setMaximumHeight(160);
+    processTable->setStyleSheet(Theme::table());
+    tl->addWidget(processTable);
     outer->addWidget(tableCard);
 
-    // ── Gantt chart ───────────────────────────────────────────────────────────
+    // ── Gantt strip ───────────────────────────────────────────────────────────
     auto* ganttCard = new QWidget();
     ganttCard->setStyleSheet(Theme::card());
     auto* gl = new QVBoxLayout(ganttCard);
     gl->setContentsMargins(14, 12, 14, 12);
     gl->setSpacing(6);
 
-    auto* gHdr = new QHBoxLayout();
-    auto* gTitle = new QLabel("Live Gantt Timeline  —  built from /proc observations");
-    gTitle->setStyleSheet(QString("color:%1; font-size:12px; font-weight:bold;").arg(Theme::TEXT_PRIMARY));
-    auto* gHint = new QLabel("Solid = Running · Faded = Sleeping");
-    gHint->setStyleSheet(QString("color:%1; font-size:10px;").arg(Theme::TEXT_MUTED));
-    gHdr->addWidget(gTitle); gHdr->addStretch(); gHdr->addWidget(gHint);
-    gl->addLayout(gHdr);
+    auto* ganttHeader = new QHBoxLayout();
+    auto* ganttTitleLbl = new QLabel("CPU Gantt Chart");
+    ganttTitleLbl->setStyleSheet(QString(
+        "color:%1; font-size:12px; font-weight:bold;"
+    ).arg(Theme::TEXT_PRIMARY));
+    statusLabel = new QLabel("Load sandbox processes, then step through the algorithm.");
+    statusLabel->setStyleSheet(QString(
+        "color:%1; font-size:10px;"
+    ).arg(Theme::TEXT_MUTED));
+    ganttHeader->addWidget(ganttTitleLbl);
+    ganttHeader->addStretch();
+    ganttHeader->addWidget(statusLabel);
+    gl->addLayout(ganttHeader);
 
-    ganttView = new SchedGanttView();
-    ganttView->setMinimumHeight(170);
-    gl->addWidget(ganttView);
-    outer->addWidget(ganttCard, 1);
+    ganttLabel = new QLabel("(not started)");
+    ganttLabel->setStyleSheet(QString(
+        "background:%1; border:1px solid %2; border-radius:8px;"
+        "padding:8px 10px; font-family:Consolas; font-size:11px; color:%3;"
+    ).arg(Theme::BG_INPUT, Theme::BORDER, Theme::TEXT_PRIMARY));
+    ganttLabel->setWordWrap(true);
+    ganttLabel->setMinimumHeight(44);
+    gl->addWidget(ganttLabel);
+    outer->addWidget(ganttCard);
 
-    // ── Log ───────────────────────────────────────────────────────────────────
-    auto* logCard = new QWidget();
-    logCard->setStyleSheet(Theme::card());
-    auto* ll = new QVBoxLayout(logCard);
-    ll->setContentsMargins(14, 12, 14, 12);
-    ll->setSpacing(4);
-    auto* logTitle = new QLabel("Event Log");
-    logTitle->setStyleSheet(QString("color:%1; font-size:12px; font-weight:bold;").arg(Theme::TEXT_PRIMARY));
-    ll->addWidget(logTitle);
+    outer->addStretch();
 
-    logView = new QTextEdit();
-    logView->setReadOnly(true);
-    logView->setMinimumHeight(70);
-    logView->setMaximumHeight(100);
-    logView->setStyleSheet(Theme::termLog());
-    ll->addWidget(logView);
-    outer->addWidget(logCard);
+    // Auto play timer
+    autoTimer = new QTimer(this);
+    connect(autoTimer, &QTimer::timeout, this, &AlgorithmStepper::stepOnce);
 
-    // Status bar
-    statusLabel = new QLabel("Select a scheduling policy and spawn a worker.");
-    statusLabel->setStyleSheet(QString("color:%1; font-size:11px;").arg(Theme::TEXT_MUTED));
-    outer->addWidget(statusLabel);
-
-    // ── Connections ───────────────────────────────────────────────────────────
-    connect(spawnBtn, &QPushButton::clicked, this, &AlgorithmStepper::onSpawnWorker);
-    connect(killBtn,  &QPushButton::clicked, this, &AlgorithmStepper::onKillWorker);
-    connect(policyBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, &AlgorithmStepper::onPolicyChanged);
-
-    sampleTimer = new QTimer(this);
-    connect(sampleTimer, &QTimer::timeout, this, &AlgorithmStepper::onSampleTick);
-
-    // Explain initial policy
-    onPolicyChanged(0);
+    connect(stepBtn,    &QPushButton::clicked, this, &AlgorithmStepper::stepOnce);
+    connect(playBtn,    &QPushButton::clicked, this, &AlgorithmStepper::toggleAutoPlay);
+    connect(resetBtn,   &QPushButton::clicked, this, &AlgorithmStepper::resetScheduler);
+    connect(algoBox,    &QComboBox::currentTextChanged, this, &AlgorithmStepper::onAlgoChanged);
+    connect(speedSlider,&QSlider::valueChanged, this, &AlgorithmStepper::onSpeedChanged);
 }
 
-void AlgorithmStepper::loadProcesses(const std::vector<pid_t>& /*pids*/) {
-    // No-op: this lab now uses its own worker instead of sandbox pids.
-    // The sandbox connection in MainWindow still exists for the old API;
-    // just silently ignore it.
+void AlgorithmStepper::loadProcesses(const std::vector<pid_t>& pids) {
+    allProcs.clear();
+    int idx = 0;
+    for (pid_t pid : pids) {
+        SchedProcess p;
+        p.pid      = pid;
+        p.burstLeft = 10 + (idx * 3);
+        p.waitTime  = 0;
+        p.state     = 0;
+        p.color     = COLORS[idx % 8];
+
+        std::ifstream f("/proc/" + std::to_string(pid) + "/status");
+        std::string line;
+        p.name = QString("proc_%1").arg(pid);
+        while (std::getline(f, line)) {
+            if (line.rfind("Name:",0)==0) {
+                p.name = QString::fromStdString(line.substr(6));
+                break;
+            }
+        }
+        p.priority = getpriority(PRIO_PROCESS, pid);
+        allProcs.push_back(p);
+        idx++;
+    }
+    resetScheduler();
 }
 
-void AlgorithmStepper::onPolicyChanged(int idx) {
-    static const char* exps[] = {
-        "<b>SCHED_OTHER — CFS (Completely Fair Scheduler)</b><br><br>"
-        "The default Linux policy. The kernel tracks each thread's virtual runtime "
-        "and always runs the thread that has had the <i>least</i> CPU time. "
-        "Nice values bias the weight: nice −20 gets ~10× more CPU than nice +19.<br><br>"
-        "<b>What you'll see:</b> All threads get roughly equal CPU time (shown by "
-        "equal utime growth). Use different nice values in future to bias them.",
+void AlgorithmStepper::resetScheduler() {
+    tick        = 0;
+    currentSlot = 0;
+    ganttHistory.clear();
+    ganttLabel->setText("(not started)");
+    tickLabel->setText("0");
+    procCountLbl->setText(QString::number(allProcs.size()));
 
-        "<b>SCHED_FIFO — Real-time, first in first out</b><br><br>"
-        "A real-time policy. Once scheduled, a FIFO thread runs until it blocks "
-        "or voluntarily yields — no preemption by other FIFO threads of equal priority. "
-        "Higher numeric priority (1–99) wins immediately.<br><br>"
-        "<b>Requires:</b> <code>CAP_SYS_NICE</code> or root. "
-        "If not privileged, the worker falls back to SCHED_OTHER and reports so.<br><br>"
-        "<b>What you'll see:</b> One thread dominates the Gantt chart until it yields.",
-
-        "<b>SCHED_RR — Real-time, round-robin</b><br><br>"
-        "Like FIFO but adds a kernel-enforced timeslice (typically 100ms). "
-        "Same-priority RR threads rotate in round-robin order. "
-        "Higher priority still preempts lower priority immediately.<br><br>"
-        "<b>What you'll see:</b> Threads at equal priority take turns in the Gantt.",
-
-        "<b>SCHED_DEADLINE — Earliest Deadline First (EDF)</b><br><br>"
-        "Per-thread deadline scheduling via <code>sched_setattr()</code>. "
-        "Each thread declares its runtime, deadline, and period. "
-        "The kernel admits or rejects based on whether deadlines can be met.<br><br>"
-        "<code>runtime=5ms, deadline=10ms, period=10ms</code> means: "
-        "this thread needs 5ms every 10ms window.<br><br>"
-        "<b>Requires:</b> CAP_SYS_NICE / root. Very visible in Gantt: "
-        "threads get short bursts tightly controlled by the kernel.",
-
-        "<b>SCHED_BATCH — CPU-intensive background</b><br><br>"
-        "Like SCHED_OTHER but the scheduler assumes the thread won't be interactive. "
-        "No wakeup preemption bonus — the thread won't get a short scheduling boost "
-        "when it wakes from sleep. Good for compile jobs, video encoding.<br><br>"
-        "<b>What you'll see:</b> Similar to OTHER but slightly less responsive.",
-
-        "<b>SCHED_IDLE — Lowest possible priority</b><br><br>"
-        "Runs only when <i>nothing else</i> is runnable. Even SCHED_OTHER nice +19 "
-        "beats SCHED_IDLE. Use for truly background tasks that should never interfere.<br><br>"
-        "<b>What you'll see:</b> Very sparse Gantt bars — the OS barely schedules these threads.",
-    };
-    if (idx >= 0 && idx < 6) emit explanationNeeded(exps[idx]);
-}
-
-void AlgorithmStepper::onSpawnWorker() {
-    if (workerProc) {
-        workerProc->kill();
-        workerProc->waitForFinished(500);
-        workerProc->deleteLater();
-        workerProc = nullptr;
-        workerPid = -1;
+    for (auto& p : allProcs) {
+        p.state    = 0;
+        p.waitTime = 0;
+        p.burstLeft = 10 + (&p - &allProcs[0]) * 3;
     }
 
-    QString policy = policyBox->currentData().toString();
-    int nThreads   = threadSpin->value();
+    readyQueue.clear();
+    QString algo = algoBox->currentText();
+    if (algo.startsWith("SJF")) {
+        std::vector<int> indices(allProcs.size());
+        for (int i=0;i<(int)allProcs.size();i++) indices[i]=i;
+        std::sort(indices.begin(), indices.end(), [&](int a, int b){
+            return allProcs[a].burstLeft < allProcs[b].burstLeft;
+        });
+        for (int i : indices) readyQueue.push_back(i);
+    } else if (algo.startsWith("Priority")) {
+        std::vector<int> indices(allProcs.size());
+        for (int i=0;i<(int)allProcs.size();i++) indices[i]=i;
+        std::sort(indices.begin(), indices.end(), [&](int a, int b){
+            return allProcs[a].priority < allProcs[b].priority;
+        });
+        for (int i : indices) readyQueue.push_back(i);
+    } else {
+        for (int i=0;i<(int)allProcs.size();i++) readyQueue.push_back(i);
+    }
 
-    workerProc = new QProcess(this);
-    workerProc->setProcessChannelMode(QProcess::MergedChannels);
-    connect(workerProc, &QProcess::readyRead, this, &AlgorithmStepper::onWorkerOutput);
-    connect(workerProc, QOverload<int,QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this](int, QProcess::ExitStatus) {
-                sampleTimer->stop();
-                workerPid = -1;
-                statPid->setText("—");
-                statPolicy->setText("—");
-                statThreads->setText("—");
-                spawnBtn->setEnabled(true);
-                killBtn->setEnabled(false);
-                logView->append(QString(
-                    "<span style='color:#94A3B8;'>[%1]</span> "
-                    "<span style='color:#FBBF24;'>Worker exited.</span>")
-                    .arg(QTime::currentTime().toString("hh:mm:ss")));
-            });
+    statusLabel->setText("Press Step or Auto Play to begin.");
+    refreshTable();
+}
 
-    workerProc->start(findSchedWorker(), {QString::number(nThreads), policy});
-    if (!workerProc->waitForStarted(2000)) {
-        statusLabel->setText("⚠ Could not start sched_worker — rebuild first.");
-        workerProc->deleteLater();
-        workerProc = nullptr;
+void AlgorithmStepper::stepOnce() {
+    if (allProcs.empty()) {
+        statusLabel->setText("No processes loaded. Spawn sandbox processes first.");
+        return;
+    }
+    bool anyLeft = false;
+    for (auto& p : allProcs) if (p.state != 2) { anyLeft = true; break; }
+    if (!anyLeft) {
+        statusLabel->setText("✓ All processes complete. Press Reset to run again.");
+        autoTimer->stop();
+        playBtn->setText("⏵ Auto Play");
+        playBtn->setStyleSheet(Theme::btnSuccess());
         return;
     }
 
-    spawnBtn->setEnabled(false);
-    killBtn->setEnabled(true);
-    ganttView->clear();
-    statusLabel->setText(QString("Spawning worker — %1 threads, policy %2…")
-        .arg(nThreads).arg(policy));
+    tick++;
+    tickLabel->setText(QString::number(tick));
 
-    logView->append(QString(
-        "<span style='color:#94A3B8;'>[%1]</span> "
-        "<span style='color:#4ADE80;'>Spawning</span> worker — "
-        "%2 threads, policy <b>%3</b>")
-        .arg(QTime::currentTime().toString("hh:mm:ss"))
-        .arg(nThreads).arg(policy));
+    QString algo = algoBox->currentText();
+    if      (algo.startsWith("FCFS"))     stepFCFS();
+    else if (algo.startsWith("Round"))    stepRR();
+    else if (algo.startsWith("Priority")) stepPriority();
+    else if (algo.startsWith("SJF"))      stepSJF();
+
+    for (auto& p : allProcs)
+        if (p.state == 0) p.waitTime++;
+
+    refreshTable();
 }
 
-void AlgorithmStepper::onWorkerOutput() {
-    if (!workerProc) return;
-    QByteArray data = workerProc->readAll();
-    for (auto& rawLine : data.split('\n')) {
-        QString line = QString::fromUtf8(rawLine).trimmed();
-        if (line.isEmpty()) continue;
+void AlgorithmStepper::stepFCFS() {
+    if (readyQueue.empty()) return;
+    int idx = readyQueue.front();
+    SchedProcess& p = allProcs[idx];
+    p.state = 1;
+    p.burstLeft--;
+    appendGantt(p.name, p.color);
 
-        if (line.startsWith("READY ")) {
-            QStringList parts = line.split(' ', Qt::SkipEmptyParts);
-            if (parts.size() >= 2) workerPid = parts[1].toLong();
-            statPid->setText(QString::number(workerPid));
-            statPolicy->setText(policyBox->currentData().toString());
+    QString explain = QString(
+        "<b>Tick %1 — FCFS</b><br><br>"
+        "Running: <b>%2</b> (PID %3)<br>"
+        "Burst remaining: %4 ticks<br>"
+        "Wait time so far: %5 ticks<br><br>"
+        "FCFS picks the process that arrived first and runs it until completion. "
+        "No interruptions — once a process starts, it runs to the end."
+    ).arg(tick).arg(p.name).arg(p.pid).arg(p.burstLeft).arg(p.waitTime);
 
-            // Start sampling
-            sampleTimer->start(500);
-
-            statusLabel->setText(QString("Worker PID %1 running").arg(workerPid));
-            logView->append(QString(
-                "<span style='color:#94A3B8;'>[%1]</span> "
-                "<span style='color:#4ADE80;'>Worker ready</span> — PID <b>%2</b>")
-                .arg(QTime::currentTime().toString("hh:mm:ss")).arg(workerPid));
-
-            emit explanationNeeded(QString(
-                "<b>Scheduler Lab — Worker PID %1</b><br><br>"
-                "Policy: <b>%2</b><br><br>"
-                "The worker called <code>sched_setscheduler(0, SCHED_%2, &sp)</code> "
-                "on each thread. You can verify:<br>"
-                "<code>cat /proc/%1/task/*/status | grep policy</code><br><br>"
-                "The Gantt chart samples <code>/proc/%1/task/[tid]/stat</code> every 500ms "
-                "and reads field 3 (state: R=running, S=sleeping, D=disk wait).<br><br>"
-                "The table shows real <code>utime</code> + <code>stime</code> "
-                "(in clock ticks since thread start) and voluntary context switch counts."
-            ).arg(workerPid).arg(policyBox->currentData().toString()));
-        }
+    if (p.burstLeft <= 0) {
+        p.state = 2;
+        readyQueue.pop_front();
+        explain += QString("<br><br>✓ <b>%1 finished</b> at tick %2.").arg(p.name).arg(tick);
+        kill(p.pid, SIGSTOP);
     }
+    emit explanationNeeded(explain);
 }
 
-void AlgorithmStepper::onSampleTick() {
-    if (workerPid <= 0) return;
-    if (kill(workerPid, 0) != 0) { workerPid = -1; sampleTimer->stop(); return; }
+void AlgorithmStepper::stepRR() {
+    while (!readyQueue.empty() && allProcs[readyQueue.front()].state == 2)
+        readyQueue.pop_front();
+    if (readyQueue.empty()) return;
 
-    auto samples = parseSamples();
-    if (samples.isEmpty()) return;
+    int idx = readyQueue.front();
+    SchedProcess& p = allProcs[idx];
+    p.state = 1;
+    p.burstLeft--;
+    appendGantt(p.name, p.color);
 
-    // Read state from /proc
-    for (auto& s : samples) {
-        s.state = readTidState(workerPid, (long)s.tid);
+    static int rrTick = 0;
+    rrTick++;
+
+    QString explain = QString(
+        "<b>Tick %1 — Round Robin (quantum=%2)</b><br><br>"
+        "Running: <b>%3</b> (PID %4)<br>"
+        "Burst remaining: %5  |  Quantum tick: %6/%7<br><br>"
+        "Round Robin gives each process a fixed time slice. "
+        "After %7 ticks, the next process gets its turn."
+    ).arg(tick).arg(quantum).arg(p.name).arg(p.pid)
+     .arg(p.burstLeft).arg(rrTick).arg(quantum);
+
+    if (p.burstLeft <= 0) {
+        p.state = 2;
+        readyQueue.pop_front();
+        rrTick = 0;
+        kill(p.pid, SIGSTOP);
+        explain += QString("<br><br>✓ <b>%1 finished.</b>").arg(p.name);
+    } else if (rrTick >= quantum) {
+        readyQueue.pop_front();
+        readyQueue.push_back(idx);
+        p.state = 0;
+        rrTick = 0;
+        explain += QString("<br><br>⏱ Quantum expired — <b>%1</b> goes to back of queue. "
+                           "Next: <b>%2</b>")
+                   .arg(p.name)
+                   .arg(allProcs[readyQueue.front()].name);
     }
-
-    statThreads->setText(QString::number(samples.size()));
-    ganttView->addSample(samples);
-    refreshTable(samples);
+    emit explanationNeeded(explain);
 }
 
-QVector<SchedGanttView::TidSample> AlgorithmStepper::parseSamples() {
-    // Read STATUS lines buffered from the worker stdout
-    // The worker continuously emits STATUS lines; we just re-read /proc directly
-    // here for a guaranteed-fresh snapshot every sample tick.
-    QVector<SchedGanttView::TidSample> result;
-    if (workerPid <= 0) return result;
-
-    QString taskPath = QString("/proc/%1/task").arg(workerPid);
-    DIR* dir = opendir(taskPath.toLocal8Bit().constData());
-    if (!dir) return result;
-
-    struct dirent* ent;
-    while ((ent = readdir(dir)) != nullptr) {
-        bool ok = false;
-        long tid = QString(ent->d_name).toLong(&ok);
-        if (!ok || tid == workerPid) continue;
-
-        SchedGanttView::TidSample s;
-        s.tid = tid;
-
-        // Read /proc/[pid]/task/[tid]/stat
-        char path[256];
-        snprintf(path, sizeof(path), "/proc/%d/task/%ld/stat", (int)workerPid, tid);
-        std::ifstream f(path);
-        if (!f.is_open()) continue;
-        std::string line;
-        std::getline(f, line);
-
-        size_t rp = line.rfind(')');
-        if (rp == std::string::npos) continue;
-        std::istringstream ss(line.substr(rp + 2));
-        char state;
-        int ppid, pgrp, session, tty_nr, tpgid;
-        unsigned long flags;
-        long minflt, cminflt, majflt, cmajflt;
-        long utime, stime;
-        ss >> state >> ppid >> pgrp >> session >> tty_nr >> tpgid >> flags
-           >> minflt >> cminflt >> majflt >> cmajflt >> utime >> stime;
-        long cutime, cstime, priority, nice;
-        ss >> cutime >> cstime >> priority >> nice;
-
-        s.state = QString(state);
-        s.utime = utime;
-        s.stime = stime;
-        s.nice  = (int)nice;
-
-        // Read policy via status
-        snprintf(path, sizeof(path), "/proc/%d/task/%ld/status", (int)workerPid, tid);
-        std::ifstream sf(path);
-        std::string sline;
-        long volsw = 0;
-        while (std::getline(sf, sline)) {
-            if (sline.rfind("voluntary_ctxt_switches:", 0) == 0) {
-                std::istringstream tmp(sline.substr(24));
-                tmp >> volsw;
-            }
-        }
-        s.switches = volsw;
-
-        // Derive policy name from sched_getscheduler
-        // We can't call it from GUI thread on another process safely,
-        // but the worker emits it — use the policyBox selection as proxy
-        s.policy = policyBox->currentData().toString();
-        s.priority = (int)priority;
-
-        result.append(s);
+void AlgorithmStepper::stepPriority() {
+    int best = -1;
+    for (int i=0;i<(int)allProcs.size();i++) {
+        if (allProcs[i].state == 2) continue;
+        if (best == -1 || allProcs[i].priority < allProcs[best].priority)
+            best = i;
     }
-    closedir(dir);
-    return result;
+    if (best == -1) return;
+
+    SchedProcess& p = allProcs[best];
+    p.state = 1;
+    p.burstLeft--;
+    appendGantt(p.name, p.color);
+
+    QString explain = QString(
+        "<b>Tick %1 — Priority Scheduling</b><br><br>"
+        "Running: <b>%2</b> (PID %3)  nice=%4<br>"
+        "Burst remaining: %5<br><br>"
+        "Priority picks the process with the lowest nice value each tick. "
+        "If a higher-priority process arrives, it preempts immediately."
+    ).arg(tick).arg(p.name).arg(p.pid).arg(p.priority).arg(p.burstLeft);
+
+    if (p.burstLeft <= 0) {
+        p.state = 2;
+        kill(p.pid, SIGSTOP);
+        explain += QString("<br><br>✓ <b>%1 finished.</b>").arg(p.name);
+    }
+    emit explanationNeeded(explain);
 }
 
-void AlgorithmStepper::refreshTable(const QVector<SchedGanttView::TidSample>& samples) {
-    static const QColor PALETTE[] = {
-        QColor("#4F6EF7"), QColor("#22C55E"), QColor("#F97316"),
-        QColor("#A855F7"), QColor("#EF4444"), QColor("#14B8A6"),
-    };
+void AlgorithmStepper::stepSJF() {
+    int best = -1;
+    for (int i=0;i<(int)allProcs.size();i++) {
+        if (allProcs[i].state == 2) continue;
+        if (best == -1 || allProcs[i].burstLeft < allProcs[best].burstLeft)
+            best = i;
+    }
+    if (best == -1) return;
 
-    tidTable->setRowCount(0);
-    int ci = 0;
-    for (auto& s : samples) {
-        int row = tidTable->rowCount();
-        tidTable->insertRow(row);
+    SchedProcess& p = allProcs[best];
+    p.state = 1;
+    p.burstLeft--;
+    appendGantt(p.name, p.color);
 
-        auto cell = [&](const QString& t, const char* c = nullptr) {
-            auto* item = new QTableWidgetItem(t);
-            item->setTextAlignment(Qt::AlignCenter);
-            if (c) item->setForeground(QColor(c));
-            return item;
+    QString explain = QString(
+        "<b>Tick %1 — SJF</b><br><br>"
+        "Running: <b>%2</b> (PID %3)<br>"
+        "Burst remaining: %4 (shortest of all ready processes)<br><br>"
+        "SJF always picks the process closest to finishing. "
+        "This minimizes average waiting time — "
+        "but in reality, you can't know burst time in advance."
+    ).arg(tick).arg(p.name).arg(p.pid).arg(p.burstLeft);
+
+    if (p.burstLeft <= 0) {
+        p.state = 2;
+        kill(p.pid, SIGSTOP);
+        explain += QString("<br><br>✓ <b>%1 finished.</b>").arg(p.name);
+    }
+    emit explanationNeeded(explain);
+}
+
+void AlgorithmStepper::appendGantt(const QString& name, const QColor& color) {
+    ganttHistory += QString("<span style='color:%1;font-weight:bold;'>[ %2 ]</span> ")
+                    .arg(color.name()).arg(name.left(6));
+    QStringList parts = ganttHistory.split("</span> ", Qt::SkipEmptyParts);
+    if (parts.size() > 18) parts = parts.mid(parts.size() - 18);
+    ganttHistory = parts.join("</span> ") + "</span> ";
+    ganttLabel->setText(ganttHistory);
+}
+
+void AlgorithmStepper::refreshTable() {
+    processTable->setRowCount(0);
+    for (auto& p : allProcs) {
+        int row = processTable->rowCount();
+        processTable->insertRow(row);
+
+        auto item = [](const QString& t, const QColor& fg = QColor(Theme::TEXT_PRIMARY)) {
+            auto* i = new QTableWidgetItem(t);
+            i->setTextAlignment(Qt::AlignCenter);
+            i->setForeground(fg);
+            return i;
         };
 
-        QString stateLabel =
-            s.state == "R" ? "▶ Running" :
-            s.state == "S" ? "◌ Sleeping" :
-            s.state == "D" ? "⧖ DiskWait" : s.state;
-        const char* stateColor =
-            s.state == "R" ? Theme::GREEN :
-            s.state == "S" ? Theme::BLUE  : Theme::ORANGE;
+        QString stateStr = p.state==0 ? "◌ Ready" : p.state==1 ? "▶ Running" : "✓ Done";
+        QColor  stateCol = p.state==0 ? QColor(Theme::BLUE) :
+                           p.state==1 ? QColor(Theme::GREEN) : QColor(Theme::TEXT_MUTED);
 
-        auto* tidItem = new QTableWidgetItem(QString("● %1").arg(s.tid));
-        tidItem->setTextAlignment(Qt::AlignCenter);
-        tidItem->setForeground(PALETTE[ci % 6]);
-        QFont bf = tidItem->font(); bf.setBold(true); tidItem->setFont(bf);
-
-        tidTable->setItem(row, 0, tidItem);
-        tidTable->setItem(row, 1, cell(stateLabel, stateColor));
-        tidTable->setItem(row, 2, cell(s.policy));
-        tidTable->setItem(row, 3, cell(s.priority > 0 ? QString::number(s.priority) : "—"));
-        tidTable->setItem(row, 4, cell(QString::number(s.nice)));
-        tidTable->setItem(row, 5, cell(QString::number(s.utime)));
-        tidTable->setItem(row, 6, cell(QString::number(s.switches)));
-        ci++;
+        processTable->setItem(row, 0, item(QString::number(p.pid)));
+        processTable->setItem(row, 1, item(p.name, p.color));
+        processTable->setItem(row, 2, item(QString::number(p.priority)));
+        processTable->setItem(row, 3, item(QString::number(std::max(0, p.burstLeft))));
+        processTable->setItem(row, 4, item(stateStr, stateCol));
     }
 }
 
-void AlgorithmStepper::onKillWorker() {
-    if (!workerProc) return;
-    sampleTimer->stop();
-    workerProc->kill();
-    workerProc->waitForFinished(500);
-    workerProc->deleteLater();
-    workerProc = nullptr;
+void AlgorithmStepper::toggleAutoPlay() {
+    if (autoTimer->isActive()) {
+        autoTimer->stop();
+        playBtn->setText("⏵ Auto Play");
+        playBtn->setStyleSheet(Theme::btnSuccess());
+    } else {
+        autoTimer->start(2000 - speedSlider->value() + 100);
+        playBtn->setText("⏸ Pause");
+        playBtn->setStyleSheet(Theme::btnWarning());
+    }
+}
 
-    workerPid = -1;
-    spawnBtn->setEnabled(true);
-    killBtn->setEnabled(false);
-    statPid->setText("—");
-    statPolicy->setText("—");
-    statThreads->setText("—");
-    tidTable->setRowCount(0);
-    statusLabel->setText("Worker killed — ready to spawn again.");
+void AlgorithmStepper::onAlgoChanged(const QString&) { resetScheduler(); }
 
-    logView->append(QString(
-        "<span style='color:#94A3B8;'>[%1]</span> "
-        "<span style='color:#F87171;'>Killed</span> worker.")
-        .arg(QTime::currentTime().toString("hh:mm:ss")));
+void AlgorithmStepper::onSpeedChanged(int val) {
+    if (autoTimer->isActive())
+        autoTimer->setInterval(2000 - val + 100);
 }

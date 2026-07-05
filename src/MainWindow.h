@@ -13,7 +13,6 @@
 #include "IPCLab.h"
 #include "SignalPanel.h"
 #include "ActivityFeed.h"
-#include "ExperimentLab.h"
 #include "Explainer.h"
 #include "ThreadLab.h"
 #include "NamespaceLab.h"
@@ -38,7 +37,6 @@ private:
     SignalPanel*      signalPanel;
     Explainer*        explainer;
     QTabWidget*       tabs;
-    ExperimentLab*    experimentLab;
     ThreadLab*        threadLab;
     NamespaceLab*     namespaceLab;
     EbpfLab*          ebpfLab;

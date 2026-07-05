@@ -39,6 +39,11 @@ public:
     explicit MemoryLab(QWidget* parent = nullptr);
     ~MemoryLab();
 
+    // Call once when the tab becomes visible for the first time.
+    void ensureStarted();
+    // Show the memory map of an arbitrary PID (e.g. a sandbox process).
+    void showMemMapForPid(pid_t pid);
+
 signals:
     void explanationNeeded(QString text);
 
@@ -62,6 +67,7 @@ private:
     ArenaView*    arenaView;
     MemMapWidget* mapView;
     QTimer*       mapTimer;
+    pid_t         displayedSandboxPid = -1; // -1 = show worker map
     QSpinBox*     sizeSpin;
     QComboBox*    strategyBox;
     QComboBox*    mprotectBox;   // RO / RW / NONE

@@ -231,23 +231,9 @@ IPCLab::IPCLab(QWidget* parent) : QWidget(parent) {
         "border-radius:8px;padding:8px 14px;font-size:12px;font-weight:bold;}"
         "QPushButton:hover{background:#CCFBF1;}");
 
-    auto* posixShmBtn = new QPushButton("📦  POSIX shm_open");
-    posixShmBtn->setStyleSheet(
-        "QPushButton{background:#F0FDF4;color:#16A34A;border:1px solid #BBF7D0;"
-        "border-radius:8px;padding:8px 14px;font-size:12px;font-weight:bold;}"
-        "QPushButton:hover{background:#DCFCE7;}");
-
-    auto* mqBtn = new QPushButton("📨  POSIX mq_open");
-    mqBtn->setStyleSheet(
-        "QPushButton{background:#FFF7ED;color:#C2410C;border:1px solid #FED7AA;"
-        "border-radius:8px;padding:8px 14px;font-size:12px;font-weight:bold;}"
-        "QPushButton:hover{background:#FFEDD5;}");
-
     btnRow->addWidget(pipeBtn);
     btnRow->addWidget(shmBtn);
     btnRow->addWidget(sockBtn);
-    btnRow->addWidget(posixShmBtn);
-    btnRow->addWidget(mqBtn);
     createLayout->addLayout(btnRow);
     outer->addWidget(createCard);
 
@@ -327,8 +313,6 @@ IPCLab::IPCLab(QWidget* parent) : QWidget(parent) {
     connect(pipeBtn,    &QPushButton::clicked, this, &IPCLab::createPipe);
     connect(shmBtn,     &QPushButton::clicked, this, &IPCLab::createSharedMem);
     connect(sockBtn,    &QPushButton::clicked, this, &IPCLab::createSocket);
-    connect(posixShmBtn, &QPushButton::clicked, this, &IPCLab::createPosixShm);
-    connect(mqBtn,      &QPushButton::clicked, this, &IPCLab::createMessageQueue);
     connect(sendBtn,    &QPushButton::clicked, this, &IPCLab::sendData);
     connect(readBtn,    &QPushButton::clicked, this, &IPCLab::readData);
     connect(destroyBtn, &QPushButton::clicked, this, &IPCLab::destroySelected);
