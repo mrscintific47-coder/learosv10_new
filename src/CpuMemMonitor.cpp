@@ -1,4 +1,5 @@
 #include "CpuMemMonitor.h"
+#include "EventBus.h"
 #include "Theme.h"
 #include <fstream>
 #include <sstream>
@@ -182,6 +183,21 @@ void CpuMemMonitor::refresh() {
     auto memAxes = memChart->axes(Qt::Horizontal);
     if (!memAxes.isEmpty())
         qobject_cast<QValueAxis*>(memAxes.first())->setRange(tick - 60, tick);
+
+    // Fire high-load events into the Activity Feed
+    if (cpu > 80) {
+        OSEvent ev; ev.type = OSEvent::CPUHighLoad;
+        ev.detail = QString("CPU high: %1%").arg(cpu, 0, 'f', 1);
+        ev.valueLong = (long)cpu;
+        EventBus::get().fire(ev);
+    }
+    if (memPercent > 80) {
+        OSEvent ev; ev.type = OSEvent::MemoryPressureHigh;
+        ev.detail = QString("RAM high: %1% (%2 MB / %3 MB)")
+            .arg(memPercent, 0, 'f', 1).arg(usedKB/1024).arg(totalKB/1024);
+        ev.valueLong = usedKB;
+        EventBus::get().fire(ev);
+    }
 
     // Emit explanation every 10 ticks
     if (tick % 10 == 0) {

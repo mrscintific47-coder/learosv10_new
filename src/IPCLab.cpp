@@ -1,4 +1,5 @@
 #include "IPCLab.h"
+#include "CleanupRegistry.h"
 #include "EventBus.h"
 #include "Theme.h"
 #include <QPainterPath>
@@ -397,6 +398,8 @@ void IPCLab::createPipe() {
 
     channels.push_back(ch);
     workers.push_back({sender, receiver});
+    LearnOSCleanup::registerPid(sender);
+    LearnOSCleanup::registerPid(receiver);
     EventBus::get().ipcCreated("Pipe", sender, receiver);
     refreshTable();
     flowView->setChannels(channels);
@@ -492,6 +495,9 @@ void IPCLab::createSharedMem() {
 
     channels.push_back(ch);
     workers.push_back({writer, reader});
+    LearnOSCleanup::registerPid(writer);
+    LearnOSCleanup::registerPid(reader);
+    LearnOSCleanup::registerShmId(ch.shmId);
     EventBus::get().ipcCreated("SharedMem", writer, reader);
     refreshTable();
     flowView->setChannels(channels);
@@ -625,6 +631,9 @@ void IPCLab::createSocket() {
 
     channels.push_back(ch);
     workers.push_back({client, server});
+    LearnOSCleanup::registerPid(client);
+    LearnOSCleanup::registerPid(server);
+    LearnOSCleanup::registerSocketPath(ch.socketPath);
     EventBus::get().ipcCreated("UnixSocket", client, server);
     refreshTable();
     flowView->setChannels(channels);
@@ -831,6 +840,7 @@ void IPCLab::killChannel(int idx) {
             usleep(50000); // 50ms grace period
             if (kill(w.sender, 0) == 0) kill(w.sender, SIGKILL);
             waitpid(w.sender, nullptr, WNOHANG);
+            LearnOSCleanup::unregisterPid(w.sender);
             w.sender = -1;
         }
         if (w.receiver > 0) {
@@ -838,6 +848,7 @@ void IPCLab::killChannel(int idx) {
             usleep(50000);
             if (kill(w.receiver, 0) == 0) kill(w.receiver, SIGKILL);
             waitpid(w.receiver, nullptr, WNOHANG);
+            LearnOSCleanup::unregisterPid(w.receiver);
             w.receiver = -1;
         }
     }
@@ -848,11 +859,18 @@ void IPCLab::killChannel(int idx) {
         if (ch.pipeFds[1] >= 0) { ::close(ch.pipeFds[1]); ch.pipeFds[1] = -1; }
     } else if (ch.type == IPCChannel::SharedMem) {
         if (ch.shmPtr && ch.shmPtr != (void*)-1) { shmdt(ch.shmPtr); ch.shmPtr = nullptr; }
-        if (ch.shmId >= 0) { shmctl(ch.shmId, IPC_RMID, nullptr); ch.shmId = -1; }
+        if (ch.shmId >= 0) {
+            shmctl(ch.shmId, IPC_RMID, nullptr);
+            LearnOSCleanup::unregisterShmId(ch.shmId);
+            ch.shmId = -1;
+        }
     } else if (ch.type == IPCChannel::UnixSocket) {
         if (ch.clientFd >= 0) { ::close(ch.clientFd); ch.clientFd = -1; }
         if (ch.serverFd >= 0) { ::close(ch.serverFd); ch.serverFd = -1; }
-        if (!ch.socketPath.empty()) unlink(ch.socketPath.c_str());
+        if (!ch.socketPath.empty()) {
+            unlink(ch.socketPath.c_str());
+            LearnOSCleanup::unregisterSocketPath(ch.socketPath);
+        }
     } else if (ch.type == IPCChannel::PosixShm) {
         if (ch.posixShmPtr && ch.posixShmPtr != MAP_FAILED) {
             munmap(ch.posixShmPtr, (size_t)ch.shmSize);

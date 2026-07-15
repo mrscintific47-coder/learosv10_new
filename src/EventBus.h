@@ -44,6 +44,13 @@ struct OSEvent {
         // System
         CPUHighLoad,        // any core > 80%
         SwapActive,         // kernel started swapping
+
+        // Observability (EbpfLab)
+        PerfCounterTick,    // one perf_event_open() sample interval
+        FtraceEvent,        // one batch of ftrace lines read from trace_pipe
+
+        // Filesystem (FilesystemLab)
+        FilesystemEvent,    // inotify event — create/delete/modify/open/close/…
     };
 
     Type    type;

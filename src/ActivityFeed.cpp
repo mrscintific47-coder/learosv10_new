@@ -1,6 +1,10 @@
 #include "ActivityFeed.h"
 #include "Theme.h"
 #include <QDateTime>
+#include <QFileDialog>
+#include <QFile>
+#include <QTextStream>
+#include <QMessageBox>
 
 ActivityFeed::ActivityFeed(QWidget* parent) : QWidget(parent) {
     setStyleSheet("background: transparent;");
@@ -13,9 +17,20 @@ ActivityFeed::ActivityFeed(QWidget* parent) : QWidget(parent) {
     title->setStyleSheet("color:#F1F5F9;font-size:11px;font-weight:bold;");
     countLabel = new QLabel("0 events");
     countLabel->setStyleSheet("color:#64748B;font-size:10px;");
+
+    auto* exportBtn = new QPushButton("⬇");
+    exportBtn->setToolTip("Export event log to a text file");
+    exportBtn->setFixedSize(22, 22);
+    exportBtn->setStyleSheet(
+        "QPushButton{background:transparent;color:#64748B;border:none;font-size:13px;padding:0;}"
+        "QPushButton:hover{color:#94A3B8;}");
+    connect(exportBtn, &QPushButton::clicked, this, &ActivityFeed::onExport);
+
     header->addWidget(title);
     header->addStretch();
     header->addWidget(countLabel);
+    header->addSpacing(4);
+    header->addWidget(exportBtn);
     layout->addLayout(header);
 
     list = new QListWidget();
@@ -52,6 +67,34 @@ void ActivityFeed::onOSEvent(OSEvent event) {
     while (list->count() > 100) delete list->takeItem(list->count()-1);
 }
 
+void ActivityFeed::onExport() {
+    if (list->count() == 0) {
+        QMessageBox::information(this, "Export", "No events to export yet.");
+        return;
+    }
+    QString path = QFileDialog::getSaveFileName(
+        this, "Export Activity Log",
+        QString("learnos_events_%1.txt")
+            .arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss")),
+        "Text files (*.txt);;All files (*)");
+    if (path.isEmpty()) return;
+
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QMessageBox::warning(this, "Export", "Could not write to " + path);
+        return;
+    }
+    QTextStream out(&f);
+    out << "# LearnOS activity log — exported "
+        << QDateTime::currentDateTime().toString(Qt::ISODate) << "\n";
+    // Items are newest-first; reverse so the file reads chronologically
+    for (int i = list->count() - 1; i >= 0; --i)
+        out << list->item(i)->text() << "\n";
+    f.close();
+
+    countLabel->setText(QString("%1 events (saved)").arg(totalEvents));
+}
+
 QString ActivityFeed::eventIcon(OSEvent::Type t) {
     switch(t) {
         case OSEvent::ProcessSpawned:     return "🟢";
@@ -71,6 +114,9 @@ QString ActivityFeed::eventIcon(OSEvent::Type t) {
         case OSEvent::DSOperation:        return "🧩";
         case OSEvent::CPUHighLoad:        return "🔥";
         case OSEvent::SwapActive:         return "💿";
+        case OSEvent::PerfCounterTick:    return "📊";
+        case OSEvent::FtraceEvent:        return "🔭";
+        case OSEvent::FilesystemEvent:    return "📁";
         default:                          return "•";
     }
 }
@@ -90,6 +136,9 @@ QColor ActivityFeed::eventColor(OSEvent::Type t) {
         case OSEvent::MemoryAllocated:
         case OSEvent::DSOperation:        return QColor(Theme::PURPLE);
         case OSEvent::SchedTick:          return QColor(Theme::BLUE);
+        case OSEvent::PerfCounterTick:
+        case OSEvent::FtraceEvent:        return QColor(Theme::TEAL);
+        case OSEvent::FilesystemEvent:    return QColor(Theme::ORANGE);
         default:                          return QColor(Theme::TEXT_SECONDARY);
     }
 }

@@ -1,4 +1,5 @@
 #include "MemoryLabDriver.h"
+#include "CleanupRegistry.h"
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
@@ -35,10 +36,18 @@ void MemoryLabDriver::start() {
     buffer.clear();
     pidVal = -1;
     proc->start(findWorkerBinary(), {});
+    // Register immediately with the QProcess PID so the crash handler can
+    // kill the worker even if the app crashes before WORKERPID is received.
+    if (proc->state() != QProcess::NotRunning) {
+        qpid = proc->processId();
+        if (qpid > 0) LearnOSCleanup::registerPid((pid_t)qpid);
+    }
 }
 
 void MemoryLabDriver::stop() {
     if (proc->state() == QProcess::NotRunning) return;
+    if (qpid > 0) { LearnOSCleanup::unregisterPid((pid_t)qpid); qpid = -1; }
+    if (pidVal > 0) { LearnOSCleanup::unregisterPid(pidVal); }
     proc->kill();
     proc->waitForFinished(500);
     pidVal = -1;
@@ -105,7 +114,11 @@ void MemoryLabDriver::processLine(const QString& line) {
         return;
     }
     if (line.startsWith("WORKERPID")) {
+        // Unregister the QProcess-level PID (it IS the worker PID for a QProcess,
+        // but register the inner PID reported by the worker too, in case they differ).
         pidVal = (pid_t)line.section(' ', 1, 1).toLong();
+        if (pidVal > 0 && pidVal != (pid_t)qpid)
+            LearnOSCleanup::registerPid(pidVal);
         emit workerPidKnown(pidVal);
         return;
     }

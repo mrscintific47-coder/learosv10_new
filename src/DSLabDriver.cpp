@@ -1,4 +1,5 @@
 #include "DSLabDriver.h"
+#include "CleanupRegistry.h"
 #include "EventBus.h"
 #include <QCoreApplication>
 #include <QFileInfo>
@@ -21,9 +22,15 @@ void DSLabDriver::start() {
     if (proc->state()!=QProcess::NotRunning) return;
     buf.clear(); nodeBuffer.clear(); hasOp=false;
     proc->start(findBinary(), {});
+    if (proc->state()!=QProcess::NotRunning) {
+        qpid = proc->processId();
+        if (qpid > 0) LearnOSCleanup::registerPid((pid_t)qpid);
+    }
 }
 void DSLabDriver::stop() {
     if (proc->state()==QProcess::NotRunning) return;
+    if (qpid > 0) { LearnOSCleanup::unregisterPid((pid_t)qpid); qpid = -1; }
+    if (pidVal > 0) { LearnOSCleanup::unregisterPid(pidVal); pidVal = -1; }
     proc->kill(); proc->waitForFinished(500);
 }
 bool DSLabDriver::isRunning() const { return proc->state()==QProcess::Running; }

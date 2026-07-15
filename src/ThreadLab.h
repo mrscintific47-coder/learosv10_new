@@ -36,6 +36,7 @@ public:
     explicit ThreadTimeline(QWidget* parent = nullptr);
     void addTick(const QVector<ThreadInfo>& threads);
     void clear();
+    static const QColor PALETTE[];   // shared palette — also used by the thread table
 protected:
     void paintEvent(QPaintEvent*) override;
 private:
@@ -43,7 +44,6 @@ private:
     QVector<Tick> history;
     QVector<long> tids;
     QMap<long,QColor> colors;
-    static const QColor PALETTE[];
 };
 
 // Lock-graph view: shows which thread holds / waits for which mutex
@@ -95,6 +95,7 @@ private:
     QPushButton*    spawnBtn;
     QPushButton*    killBtn;
     QPushButton*    clearLogBtn;
+    QWidget*        lockCard;       // shown only for the Deadlock demo
     QTableWidget*   threadTable;
     ThreadTimeline* timeline;
     LockGraphView*  lockGraph;

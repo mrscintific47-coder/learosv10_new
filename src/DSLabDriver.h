@@ -74,8 +74,9 @@ private:
     QByteArray buf;
     std::vector<DSWorkerNode> nodeBuffer;
     DSWorkerOp pendingOp;
-    bool hasOp  = false;
-    pid_t pidVal = -1;
+    bool   hasOp  = false;
+    pid_t  pidVal = -1;
+    qint64 qpid   = -1;  // QProcess::processId() — registered on start()
 
     void send(const QString& line);
     void processLine(const QString& line);

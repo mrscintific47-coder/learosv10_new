@@ -179,7 +179,7 @@ void MainWindow::setupUI() {
 
     // Status bar
     statusBar()->showMessage(
-        "  LearnOS v10   ·   live /proc data   ·   real kernel syscalls   ·   nothing simulated");
+        "  LearnOS v10   ·   live /proc data   ·   real kernel syscalls   ·   Scheduler tab = algorithm visualiser only");
 
     heatMapDriver = new HeatMapDriver(heatMap, this);
 }

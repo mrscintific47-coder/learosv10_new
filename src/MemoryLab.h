@@ -13,15 +13,16 @@
 
 // Custom-painted strip showing the arena: a horizontal bar split into
 // blocks, used blocks colored by a hash of their id, free space light gray.
-// Clicking a used block frees it.
+// Clicking a used block selects it (highlighted); use the Free button to free it.
 class ArenaView : public QWidget {
     Q_OBJECT
 public:
     explicit ArenaView(QWidget* parent = nullptr);
     void setBlocks(const std::vector<ArenaBlock>& blocks, long totalBytes);
+    void setSelected(int id);   // -1 = deselect all
 
 signals:
-    void blockClicked(int id);
+    void blockSelected(int id); // emitted when user clicks a block
 
 protected:
     void paintEvent(QPaintEvent*) override;
@@ -30,6 +31,7 @@ protected:
 private:
     std::vector<ArenaBlock> blocks;
     long totalBytes = 1;
+    int  selectedId = -1;
     QColor colorForId(int id) const;
 };
 
@@ -54,7 +56,8 @@ private slots:
     void onWorkerDied();
     void onWorkerReady(long capacityBytes);
     void onWorkerPidKnown(pid_t pid);
-    void onBlockClicked(int id);
+    void onBlockSelected(int id);
+    void onFreeSelectedClicked();
     void onResetClicked();
     void onRestartClicked();
     void onMapRefresh();
@@ -69,13 +72,14 @@ private:
     QTimer*       mapTimer;
     pid_t         displayedSandboxPid = -1; // -1 = show worker map
     QSpinBox*     sizeSpin;
-    QComboBox*    strategyBox;
+    QPushButton*  freeBtn;       // frees the currently selected block
     QComboBox*    mprotectBox;   // RO / RW / NONE
     QComboBox*    madviseBox;    // DONTNEED / WILLNEED
     QLabel*       statsLabel;
     QLabel*       statusLabel;
     QLabel*       smapsLabel;    // shows smaps diff after mprotect/madvise/COW
     long          capacityBytes = 0;
+    int           selectedBlockId = -1; // block selected in the arena strip
 
     void updateStatsLabel(const ArenaSummary& s);
     void refreshSmapsDiff();     // reads /proc/pid/smaps_rollup and shows delta

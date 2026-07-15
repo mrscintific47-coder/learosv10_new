@@ -6,10 +6,11 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Widgets Charts)
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets Charts Test)
 
 add_executable(LearnOS
     src/main.cpp
+    src/CleanupRegistry.cpp
     src/MainWindow.cpp
     src/HeatMap.cpp
     src/HeatMapDriver.cpp
@@ -33,7 +34,11 @@ add_executable(LearnOS
     src/NamespaceLab.cpp
     src/EbpfLab.cpp
     src/FilesystemLab.cpp
+    src/FsCanvas.cpp
 )
+
+# CleanupRegistry.h/.cpp listed for IDEs and CMake dependency tracking
+target_sources(LearnOS PRIVATE src/CleanupRegistry.h)
 
 # pthread for ThreadLab (pthread_create, pthread_mutex_t, etc.)
 find_package(Threads REQUIRED)
@@ -86,3 +91,30 @@ set_target_properties(sched_worker PROPERTIES
 # Install targets
 install(TARGETS LearnOS memlab_worker dslab_worker learnos_thread_worker sched_worker
     RUNTIME DESTINATION bin)
+
+# ── Automated tests ────────────────────────────────────────────────────────────
+enable_testing()
+
+# Test 1: DSTinyVM — exercises the mini interpreter (no kernel, no QWidget)
+add_executable(test_dsvm
+    tests/test_dsvm.cpp
+    src/CleanupRegistry.cpp    # provides LearnOSCleanup globals + shadow arrays
+    src/DataStructureLab.cpp   # brings in DSTinyVM implementation
+    src/DSLabDriver.cpp        # DataStructureLab.cpp pulls this in transitively
+    src/MemoryInspector.cpp    # pulled in by DataStructureLab.h indirectly
+    src/EventBus.cpp           # EventBus singleton used by DSLabDriver
+)
+target_include_directories(test_dsvm PRIVATE src)
+target_link_libraries(test_dsvm
+    Qt6::Core
+    Qt6::Widgets               # needed because DataStructureLab.cpp uses QWidget
+    Qt6::Test
+    Threads::Threads
+)
+add_test(NAME DSTinyVM COMMAND test_dsvm)
+
+# Test 2: Scheduler logic — pure C++ step simulation, no Qt widgets
+add_executable(test_scheduler tests/test_scheduler.cpp)
+target_include_directories(test_scheduler PRIVATE src)
+target_link_libraries(test_scheduler Qt6::Core Qt6::Test)
+add_test(NAME Scheduler COMMAND test_scheduler)

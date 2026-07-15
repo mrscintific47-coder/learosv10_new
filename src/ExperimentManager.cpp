@@ -1,4 +1,5 @@
 #include "ExperimentManager.h"
+#include "CleanupRegistry.h"
 #include <QFile>
 #include <QTextStream>
 #include <QDateTime>
@@ -241,6 +242,7 @@ void ExperimentManager::spawnProcesses(int count, const QStringList& workloads) 
             // Start paused — experiment manager controls who runs
             kill(pid, SIGSTOP);
             processes.append(p);
+            LearnOSCleanup::registerPid(pid);
             EventBus::get().processSpawned(pid, p.name, wl);
         }
     }
@@ -261,6 +263,7 @@ void ExperimentManager::killAllProcesses() {
             kill(p.pid, SIGCONT); // unfreeze first
             kill(p.pid, SIGKILL);
             waitpid(p.pid, nullptr, WNOHANG);
+            LearnOSCleanup::unregisterPid(p.pid);
             p.alive = false;
         }
     }

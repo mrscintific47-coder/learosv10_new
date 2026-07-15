@@ -1,4 +1,5 @@
 #include "AlgorithmStepper.h"
+#include "EventBus.h"
 #include "Theme.h"
 #include <QHeaderView>
 #include <QFont>
@@ -290,6 +291,11 @@ void AlgorithmStepper::stepOnce() {
     else if (algo.startsWith("Priority")) stepPriority();
     else if (algo.startsWith("SJF"))      stepSJF();
 
+    // Fire a sched tick into the activity feed for every step
+    QString running;
+    for (auto& p : allProcs) if (p.state == 1) { running = p.name; break; }
+    EventBus::get().schedTick(tick, algo.left(4), running.isEmpty() ? "idle" : running);
+
     for (auto& p : allProcs)
         if (p.state == 0) p.waitTime++;
 
@@ -318,6 +324,9 @@ void AlgorithmStepper::stepFCFS() {
         readyQueue.pop_front();
         explain += QString("<br><br>✓ <b>%1 finished</b> at tick %2.").arg(p.name).arg(tick);
         kill(p.pid, SIGSTOP);
+        OSEvent ev; ev.type = OSEvent::SchedProcessDone; ev.pid = p.pid;
+        ev.detail = QString("FCFS: %1 (PID %2) finished at tick %3").arg(p.name).arg(p.pid).arg(tick);
+        EventBus::get().fire(ev);
     }
     emit explanationNeeded(explain);
 }
@@ -471,7 +480,12 @@ void AlgorithmStepper::toggleAutoPlay() {
     }
 }
 
-void AlgorithmStepper::onAlgoChanged(const QString&) { resetScheduler(); }
+void AlgorithmStepper::onAlgoChanged(const QString& algo) {
+    resetScheduler();
+    OSEvent ev; ev.type = OSEvent::SchedAlgoChanged;
+    ev.detail = QString("Scheduler: %1").arg(algo.left(30));
+    EventBus::get().fire(ev);
+}
 
 void AlgorithmStepper::onSpeedChanged(int val) {
     if (autoTimer->isActive())

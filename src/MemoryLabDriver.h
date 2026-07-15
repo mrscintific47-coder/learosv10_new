@@ -60,9 +60,10 @@ private slots:
     void onProcessFinished(int exitCode, QProcess::ExitStatus status);
 
 private:
-    QProcess* proc      = nullptr;
-    pid_t     pidVal    = -1;
-    long      lastBlock = -1;   // track last known live block id
+    QProcess*  proc      = nullptr;
+    pid_t      pidVal    = -1;
+    qint64     qpid      = -1;  // QProcess::processId() — registered on start()
+    long       lastBlock = -1;  // track last known live block id
     QByteArray buffer;
     std::vector<ArenaBlock> pendingBlocks;
 

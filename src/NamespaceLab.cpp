@@ -1,4 +1,6 @@
 #include "NamespaceLab.h"
+#include "CleanupRegistry.h"
+#include "EventBus.h"
 #include "Theme.h"
 #include <QHeaderView>
 #include <QFileInfo>
@@ -278,8 +280,12 @@ NamespaceLab::NamespaceLab(QWidget* parent) : QWidget(parent) {
 }
 
 NamespaceLab::~NamespaceLab() {
+    if (childPid > 0) {
+        kill(childPid, SIGKILL);
+        waitpid(childPid, nullptr, WNOHANG);
+        LearnOSCleanup::unregisterPid(childPid);
+    }
     if (childStack) free(childStack);
-    if (childPid > 0) { kill(childPid, SIGKILL); waitpid(childPid, nullptr, WNOHANG); }
 }
 
 void NamespaceLab::onNsTypeChanged(int idx) {
@@ -419,6 +425,10 @@ void NamespaceLab::onSpawnIsolated() {
     // Parent closes write end; reads inner PID from child
     ::close(pipefd[1]);
 
+    if (childPid > 0) {
+        LearnOSCleanup::registerPid(childPid);
+    }
+
     if (childPid < 0) {
         int err = errno;
         ::close(pipefd[0]);
@@ -467,6 +477,12 @@ void NamespaceLab::onSpawnIsolated() {
     logView->append(QString("[%1] clone(%2) → outer PID %3, inner PID %4")
         .arg(QTime::currentTime().toString("hh:mm:ss"))
         .arg(flagStr).arg(childPid).arg(innerPid > 0 ? QString::number(innerPid) : "?"));
+
+    // Fire into ActivityFeed sidebar
+    EventBus::get().processSpawned(childPid,
+        QString("ns-child [%1]").arg(flagStr.left(20)),
+        QString("clone(%1)").arg(flagStr.left(20)));
+
     onRefresh();
 
     emit explanationNeeded(QString(
@@ -487,6 +503,7 @@ void NamespaceLab::onKillChild() {
     if (childPid <= 0) return;
     kill(childPid, SIGKILL);
     waitpid(childPid, nullptr, WNOHANG);
+    LearnOSCleanup::unregisterPid(childPid);
     logView->append(QString("[%1] Killed outer PID %2")
         .arg(QTime::currentTime().toString("hh:mm:ss")).arg(childPid));
     childPid = -1;
@@ -527,7 +544,17 @@ void NamespaceLab::onRunInNamespace() {
             "Install util-linux and try again.</span>"));
         return;
     }
-    p.waitForFinished(5000);
+    if (!p.waitForFinished(5000)) {
+        // nsenter hung (namespace gone, stuck command, etc.) — kill it hard so
+        // it doesn't become an orphan.  The process was never registered in
+        // CleanupRegistry because it was expected to be synchronous-and-short;
+        // killing it here before the stack frame exits keeps that contract true.
+        p.kill();
+        p.waitForFinished(500);
+        logView->append(QString(
+            "<span style='color:#F97316;'>[nsenter timed out after 5 s — killed]</span>"));
+        return;
+    }
     QString out = QString::fromLocal8Bit(p.readAll()).trimmed();
     if (out.isEmpty()) out = "(no output)";
 
@@ -545,10 +572,12 @@ void NamespaceLab::onRunInNamespace() {
 
 void NamespaceLab::onRefresh() {
     if (childPid > 0 && kill(childPid, 0) != 0) {
+        LearnOSCleanup::unregisterPid(childPid);
         childPid = -1;
         if (childStack) { free(childStack); childStack = nullptr; }
         spawnBtn->setEnabled(true);
         killBtn->setEnabled(false);
+        runInNsBtn->setEnabled(false);
         innerPidLabel->setText("Inner PID: — (child exited)");
     }
     refreshTable();

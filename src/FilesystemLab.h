@@ -9,10 +9,13 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QComboBox>
+#include <QMap>
 #include <QPainter>
+#include <QTabWidget>
 #include <vector>
 #include <unistd.h>
 #include <sys/inotify.h>
+#include "FsCanvas.h"
 
 struct InotifyEvent {
     QString timestamp;
@@ -32,6 +35,14 @@ private:
     int eventCount = 0;
 };
 
+// Cross-reference: which lab is each /proc/sys entry relevant to?
+struct ProcEntry {
+    QString path;
+    bool    writable   = false;  // can be written without root? (proc/sys only)
+    bool    needsRoot  = false;  // write requires CAP_SYS_ADMIN
+    QString relevantTo;          // e.g. "Memory Lab", "Scheduler", ""
+};
+
 class FilesystemLab : public QWidget {
     Q_OBJECT
 public:
@@ -46,18 +57,23 @@ private slots:
     void onStopWatching();
     void onCreateFile();
     void onDeleteFile();
-    void onBrowseProcSys();
     void onInotifyReady();
     void onTreeItemClicked(QTreeWidgetItem* item, int col);
+    void onTreeItemDoubleClicked(QTreeWidgetItem* item, int col);
+    void onProcRefreshTimer();  // Fix 1: live value refresh
 
 private:
-    // inotify
+    // ── inotify watcher (left panel) ─────────────────────────────────────────
     int inotifyFd = -1;
     int watchFd   = -1;
     QString watchedPath;
-    QTimer* inotifyTimer = nullptr;
+    QTimer* inotifyTimer  = nullptr;
+    QTimer* procRefreshTimer = nullptr;  // Fix 1
 
-    // UI
+    // /proc/sys write safety: remember the value at session start
+    QMap<QString, QString> originalSysValues;
+
+    // ── UI ────────────────────────────────────────────────────────────────────
     QLineEdit*       pathInput;
     QPushButton*     watchBtn;
     QPushButton*     stopBtn;
@@ -66,8 +82,33 @@ private:
     InotifyEventLog* eventLog;
     QTreeWidget*     procTree;
     QLabel*          statusLabel;
+    QLabel*          procStatusLabel;   // Fix 1: "Last refreshed: hh:mm:ss"
 
+    // ── Sandbox canvas (right tab) ────────────────────────────────────────────
+    FsCanvas*    fsCanvas  = nullptr;
+    QPushButton* newFileBtn;
+    QPushButton* newDirBtn;
+    QPushButton* hardLinkBtn;
+    QPushButton* symLinkBtn;
+    QPushButton* deleteNodeBtn;
+    QPushButton* renameNodeBtn;
+    QLabel*      sandboxStatusLabel;
+
+    // ── helpers ───────────────────────────────────────────────────────────────
     void buildProcTree();
-    void addProcNode(QTreeWidgetItem* parent, const QString& path, int depth);
+    void refreshProcValues();  // Fix 1: update column 1 for all visible items
     QString maskToString(uint32_t mask);
+
+    // Fix 2: icon + tooltip per entry
+    static QIcon  iconForEntry(const ProcEntry& e);
+    static QString tooltipForEntry(const ProcEntry& e);
+
+    // Fix 3: explanation text with "relevant to" tag
+    QString explanationForProcPath(const QString& path,
+                                   const QString& content,
+                                   const ProcEntry* entry) const;
+
+    // Metadata table — indexed by path
+    static const QVector<ProcEntry>& allEntries();
+    const ProcEntry* entryFor(const QString& path) const;
 };

@@ -1,4 +1,5 @@
 #include "SandboxManager.h"
+#include "CleanupRegistry.h"
 #include "EventBus.h"
 #include "Theme.h"
 #include <sys/wait.h>
@@ -118,7 +119,11 @@ SandboxManager::SandboxManager(QWidget* parent) : QWidget(parent) {
 }
 
 SandboxManager::~SandboxManager() {
-    for (auto& p : processes) { kill(p.pid, SIGKILL); waitpid(p.pid, nullptr, WNOHANG); }
+    for (auto& p : processes) {
+        kill(p.pid, SIGKILL);
+        waitpid(p.pid, nullptr, WNOHANG);
+        LearnOSCleanup::unregisterPid(p.pid);
+    }
 }
 
 void SandboxManager::spawnCPU()    { spawn(WorkloadType::CPU); }
@@ -160,6 +165,7 @@ void SandboxManager::spawn(WorkloadType type) {
         SandboxProcess sp; sp.pid=pid; sp.name=name.toStdString();
         sp.type=type; sp.priority=0; sp.paused=false;
         processes.push_back(sp);
+        LearnOSCleanup::registerPid(pid);
         refreshList();
         emitPids();
         EventBus::get().processSpawned(pid, QString::fromStdString(name.toStdString()), typeName);
@@ -188,6 +194,7 @@ void SandboxManager::killSelected() {
     if (!item) return;
     pid_t pid = item->data(Qt::UserRole).toInt();
     kill(pid, SIGKILL); waitpid(pid, nullptr, WNOHANG);
+    LearnOSCleanup::unregisterPid(pid);
     EventBus::get().processKilled(pid, QString::fromStdString(
         [&]{ for(auto&p:processes) if(p.pid==pid) return p.name; return std::string("?"); }()
     ));
@@ -298,6 +305,7 @@ void SandboxManager::onZombieReap() {
         [&changed](const SandboxProcess& p) {
             if (kill(p.pid, 0) != 0) {
                 waitpid(p.pid, nullptr, WNOHANG);
+                LearnOSCleanup::unregisterPid(p.pid);
                 changed = true;
                 return true;
             }

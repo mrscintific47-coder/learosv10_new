@@ -1,4 +1,5 @@
 #include "EbpfLab.h"
+#include "EventBus.h"
 #include "Theme.h"
 #include <QHeaderView>
 #include <QPainterPath>
@@ -336,6 +337,23 @@ void EbpfLab::onStopPerfCounters() {
 void EbpfLab::onPerfTick() {
     readCounters();
     refreshCounterTable();
+
+    // Summarise all active counters into a single feed event.
+    // valueLong = total instructions (most fundamental counter); extra = summary string.
+    long instTotal = 0;
+    QStringList parts;
+    for (auto& c : counters) {
+        if (c.fd < 0) continue;
+        parts << QString("%1+%2/s").arg(c.name).arg(c.delta);
+        if (c.name == "instructions") instTotal = c.value;
+    }
+    if (!parts.isEmpty()) {
+        OSEvent e;
+        e.type      = OSEvent::PerfCounterTick;
+        e.detail    = "perf: " + parts.join("  ");
+        e.valueLong = instTotal;
+        EventBus::get().fire(e);
+    }
 }
 
 void EbpfLab::readCounters() {
@@ -607,6 +625,19 @@ void EbpfLab::onFtraceReady() {
             traceLog->setHtml(html);
             return;  // don't append raw lines for raw_syscalls mode
         }
+    }
+
+    // Fire a single aggregated event per read batch so the activity feed
+    // shows ftrace activity without flooding it with one entry per line.
+    {
+        int lineCount = text.count('\n') + 1;
+        OSEvent e;
+        e.type   = OSEvent::FtraceEvent;
+        e.detail = QString("ftrace [%1]: %2 events")
+                       .arg(probeBox->currentText().section(' ', 0, 0))
+                       .arg(lineCount);
+        e.valueLong = lineCount;
+        EventBus::get().fire(e);
     }
 
     // Normal mode: append raw lines

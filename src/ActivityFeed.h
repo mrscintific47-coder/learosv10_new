@@ -2,7 +2,9 @@
 #include <QWidget>
 #include <QListWidget>
 #include <QLabel>
+#include <QPushButton>
 #include <QVBoxLayout>
+#include <QHBoxLayout>
 #include <QTimer>
 #include "EventBus.h"
 
@@ -15,6 +17,9 @@ public:
 
 public slots:
     void onOSEvent(OSEvent event);
+
+private slots:
+    void onExport();
 
 private:
     QListWidget* list;
