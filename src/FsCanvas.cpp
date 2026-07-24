@@ -1274,7 +1274,7 @@ void FsCanvas::mousePressEvent(QMouseEvent* e) {
             if (!isRoot)
                 menu->addAction("🗑 Delete",       this, &FsCanvas::doDelete);
 
-            menu->popup(e->globalPos());
+            menu->popup(e->globalPosition().toPoint());
             return;  // do not pass right-click to the scene's scroll-drag handler
         }
     }
