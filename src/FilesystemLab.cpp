@@ -18,6 +18,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
+#include <pwd.h>
 
 // ── InotifyEventLog ───────────────────────────────────────────────────────────
 
@@ -293,71 +294,122 @@ FilesystemLab::FilesystemLab(QWidget* parent) : QWidget(parent) {
     tabs->addTab(tab1, "👁  Watch & Browse");
 
     // ════════════════════════════════════════════════════════════════════════
-    // Tab 2: Sandbox filesystem builder
+    // Tab 2: Sandbox filesystem builder — real OS experiments
     // ════════════════════════════════════════════════════════════════════════
     auto* tab2 = new QWidget();
     tab2->setStyleSheet(QString("background:%1;").arg(Theme::BG_APP));
     auto* sbLayout = new QVBoxLayout(tab2);
     sbLayout->setContentsMargins(8,8,8,8);
-    sbLayout->setSpacing(8);
+    sbLayout->setSpacing(6);
 
     // Sandbox description
     auto* sbHint = new QLabel(
-        "Build real filesystem structures using genuine syscalls — "
-        "<code>mkdir</code>, <code>open</code>, <code>link</code>, <code>symlink</code>, "
-        "<code>unlink</code>, <code>rename</code>. "
-        "Everything lives in <code>~/.learnos/fslab_sandbox/</code>. "
-        "Nodes show real <b>inode numbers</b> and <b>link counts</b> from <code>stat()</code>. "
-        "Solid edges = hard links (same inode). Dashed arrows = symlinks. "
-        "A dashed red arrow = dangling symlink.");
+        "Real filesystem experiments — every button calls a genuine syscall. "
+        "Nodes show live <b>permissions</b>, <b>inode</b>, <b>link count</b>, "
+        "<b>disk blocks</b> vs apparent size. "
+        "Double-click a folder to enter it. "
+        "🔒 = flock held  ⚙ = opened by sandbox process  sparse! = hole in file.");
     sbHint->setWordWrap(true);
     sbHint->setStyleSheet(QString(
         "color:%1;font-size:11px;padding:6px 8px;"
-        "background:%2;border-left:3px solid %3;"
-        "border-radius:4px;"
+        "background:%2;border-left:3px solid %3;border-radius:4px;"
     ).arg(Theme::TEXT_SECONDARY).arg(Theme::BLUE_LIGHT).arg(Theme::BLUE));
     sbLayout->addWidget(sbHint);
 
-    // Toolbar
-    auto* toolbar = new QWidget();
-    toolbar->setStyleSheet(Theme::card());
-    auto* tbRow = new QHBoxLayout(toolbar);
-    tbRow->setContentsMargins(8,6,8,6);
-    tbRow->setSpacing(6);
+    // ── Toolbar row 1: Structure ──────────────────────────────────────────────
+    auto* toolbar1 = new QWidget();
+    toolbar1->setStyleSheet(Theme::card());
+    auto* tb1 = new QHBoxLayout(toolbar1);
+    tb1->setContentsMargins(8,5,8,5); tb1->setSpacing(5);
 
-    newFileBtn    = new QPushButton("📄 New File");
-    newDirBtn     = new QPushButton("📁 New Folder");
+    newFileBtn    = new QPushButton("📄 File");
+    newDirBtn     = new QPushButton("📁 Dir");
     hardLinkBtn   = new QPushButton("🔗 Hard Link");
     symLinkBtn    = new QPushButton("↪ Sym Link");
-    deleteNodeBtn = new QPushButton("🗑 Delete");
     renameNodeBtn = new QPushButton("✏ Rename");
+    deleteNodeBtn = new QPushButton("🗑 Delete");
+    upDirBtn      = new QPushButton("⬆ Up");
 
     for (auto* b : {newFileBtn, newDirBtn}) b->setStyleSheet(Theme::btnSuccess());
     hardLinkBtn->setStyleSheet(Theme::btnPrimary());
     symLinkBtn->setStyleSheet(Theme::btnWarning());
     deleteNodeBtn->setStyleSheet(Theme::btnDanger());
     renameNodeBtn->setStyleSheet(Theme::btnGhost());
+    upDirBtn->setStyleSheet(Theme::btnGhost());
 
-    tbRow->addWidget(newFileBtn);
-    tbRow->addWidget(newDirBtn);
-    tbRow->addSpacing(8);
-    tbRow->addWidget(hardLinkBtn);
-    tbRow->addWidget(symLinkBtn);
-    tbRow->addSpacing(8);
-    tbRow->addWidget(renameNodeBtn);
-    tbRow->addWidget(deleteNodeBtn);
-    tbRow->addStretch();
+    tb1->addWidget(upDirBtn);
+    tb1->addSpacing(4);
+    tb1->addWidget(newFileBtn);
+    tb1->addWidget(newDirBtn);
+    tb1->addSpacing(4);
+    tb1->addWidget(hardLinkBtn);
+    tb1->addWidget(symLinkBtn);
+    tb1->addSpacing(4);
+    tb1->addWidget(renameNodeBtn);
+    tb1->addWidget(deleteNodeBtn);
+    tb1->addStretch();
+    sbLayout->addWidget(toolbar1);
+
+    // ── Toolbar row 2: Experiments ────────────────────────────────────────────
+    auto* toolbar2 = new QWidget();
+    toolbar2->setStyleSheet(Theme::card());
+    auto* tb2 = new QHBoxLayout(toolbar2);
+    tb2->setContentsMargins(8,5,8,5); tb2->setSpacing(5);
+
+    chmodBtn    = new QPushButton("🔑 chmod");
+    chownBtn    = new QPushButton("👤 chown");
+    writeBtn    = new QPushButton("✍ Write");
+    readBtn     = new QPushButton("📖 Read");
+    oDirect     = new QPushButton("⚡ Buffered I/O");
+    lockDemoBtn = new QPushButton("🔒 Lock Demo");
+    sparseBtn   = new QPushButton("🕳 Sparse File");
+
+    chmodBtn->setStyleSheet(Theme::btnPrimary());
+    chownBtn->setStyleSheet(Theme::btnGhost());
+    writeBtn->setStyleSheet(Theme::btnSuccess());
+    readBtn->setStyleSheet(Theme::btnGhost());
+    oDirect->setStyleSheet(Theme::btnGhost());
+    lockDemoBtn->setStyleSheet(Theme::btnWarning());
+    sparseBtn->setStyleSheet(Theme::btnGhost());
+
+    tb2->addWidget(chmodBtn);
+    tb2->addWidget(chownBtn);
+    tb2->addSpacing(4);
+    tb2->addWidget(writeBtn);
+    tb2->addWidget(readBtn);
+    tb2->addWidget(oDirect);
+    tb2->addSpacing(4);
+    tb2->addWidget(lockDemoBtn);
+    tb2->addWidget(sparseBtn);
+    tb2->addStretch();
+
+    procFdLabel = new QLabel("⚙ 0 ext FDs");
+    procFdLabel->setStyleSheet(QString(
+        "color:#7C3AED;background:#F5F3FF;border-radius:6px;"
+        "padding:2px 8px;font-size:10px;font-weight:bold;"));
+    procFdLabel->setToolTip("Number of sandbox process file descriptors pointing into this directory");
+    tb2->addWidget(procFdLabel);
+    sbLayout->addWidget(toolbar2);
+
+    // Breadcrumb + status row
+    auto* navRow = new QHBoxLayout();
+    navRow->setContentsMargins(4,0,4,0);
+    navRow->setSpacing(6);
+
+    // Breadcrumb is owned by FsCanvas but we place it here
+    fsCanvas = new FsCanvas();
+    fsCanvas->breadcrumb()->setParent(tab2);
+    navRow->addWidget(fsCanvas->breadcrumb(), 1);
 
     sandboxStatusLabel = new QLabel("Sandbox ready.");
     sandboxStatusLabel->setStyleSheet(QString("color:%1;font-size:11px;").arg(Theme::TEXT_MUTED));
-    tbRow->addWidget(sandboxStatusLabel);
-    sbLayout->addWidget(toolbar);
+    navRow->addWidget(sandboxStatusLabel);
+    sbLayout->addLayout(navRow);
 
     // Canvas
-    fsCanvas = new FsCanvas();
     sbLayout->addWidget(fsCanvas, 1);
 
-    tabs->addTab(tab2, "🧱  Sandbox Builder");
+    tabs->addTab(tab2, "🧱  Sandbox");
 
     outer->addWidget(tabs, 1);
 
@@ -369,16 +421,36 @@ FilesystemLab::FilesystemLab(QWidget* parent) : QWidget(parent) {
     connect(procTree, &QTreeWidget::itemClicked,       this, &FilesystemLab::onTreeItemClicked);
     connect(procTree, &QTreeWidget::itemDoubleClicked, this, &FilesystemLab::onTreeItemDoubleClicked);
 
-    // Sandbox toolbar
+    // Sandbox toolbar row 1 (structure)
     connect(newFileBtn,    &QPushButton::clicked, fsCanvas, &FsCanvas::doNewFile);
     connect(newDirBtn,     &QPushButton::clicked, fsCanvas, &FsCanvas::doNewDir);
     connect(hardLinkBtn,   &QPushButton::clicked, fsCanvas, &FsCanvas::doHardLink);
     connect(symLinkBtn,    &QPushButton::clicked, fsCanvas, &FsCanvas::doSymLink);
     connect(deleteNodeBtn, &QPushButton::clicked, fsCanvas, &FsCanvas::doDelete);
     connect(renameNodeBtn, &QPushButton::clicked, fsCanvas, &FsCanvas::doRename);
+    connect(upDirBtn,      &QPushButton::clicked, fsCanvas, &FsCanvas::goUp);
+
+    // Sandbox toolbar row 2 (experiments)
+    connect(chmodBtn,    &QPushButton::clicked, fsCanvas, &FsCanvas::doChmod);
+    connect(chownBtn,    &QPushButton::clicked, fsCanvas, &FsCanvas::doChown);
+    connect(writeBtn,    &QPushButton::clicked, fsCanvas, &FsCanvas::doWriteContent);
+    connect(readBtn,     &QPushButton::clicked, fsCanvas, &FsCanvas::doReadContent);
+    connect(oDirect,     &QPushButton::clicked, this,     &FilesystemLab::onODirectToggled);
+    connect(lockDemoBtn, &QPushButton::clicked, fsCanvas, &FsCanvas::doLockDemo);
+    connect(sparseBtn,   &QPushButton::clicked, fsCanvas, &FsCanvas::doMakeHole);
+
     connect(fsCanvas, &FsCanvas::statusMessage, this, [this](const QString& msg){
         sandboxStatusLabel->setText(msg);
     });
+    connect(fsCanvas, &FsCanvas::dirChanged, this, [this](const QString& dir){
+        QString dirName = QFileInfo(dir).fileName().isEmpty()
+                         ? "sandbox" : QFileInfo(dir).fileName();
+        sandboxStatusLabel->setText("context: " + dirName);
+        // UX fix: live-update toolbar button labels to show where new nodes will land
+        newFileBtn->setText(QString("📄 in %1/").arg(dirName));
+        newDirBtn ->setText(QString("📁 in %1/").arg(dirName));
+    });
+
     connect(fsCanvas, &FsCanvas::nodeClicked, this, [this](const FsNodeData& d){
         QString typeStr;
         switch (d.type) {
@@ -386,44 +458,123 @@ FilesystemLab::FilesystemLab(QWidget* parent) : QWidget(parent) {
             case FsNodeData::Symlink: typeStr = "symbolic link"; break;
             default:                  typeStr = "regular file"; break;
         }
+        // Permission bits
+        auto permStr = [](mode_t m) -> QString {
+            char s[10];
+            s[0] = (m & S_IRUSR) ? 'r' : '-'; s[1] = (m & S_IWUSR) ? 'w' : '-';
+            s[2] = (m & S_IXUSR) ? 'x' : '-'; s[3] = (m & S_IRGRP) ? 'r' : '-';
+            s[4] = (m & S_IWGRP) ? 'w' : '-'; s[5] = (m & S_IXGRP) ? 'x' : '-';
+            s[6] = (m & S_IROTH) ? 'r' : '-'; s[7] = (m & S_IWOTH) ? 'w' : '-';
+            s[8] = (m & S_IXOTH) ? 'x' : '-'; s[9] = 0;
+            return QString::fromLatin1(s);
+        };
+        struct passwd* pw = getpwuid(d.uid);
+        QString ownerStr = pw ? QString::fromLocal8Bit(pw->pw_name)
+                              : QString::number(d.uid);
+        off_t diskBytes = (off_t)d.blocks * 512;
+        bool sparse = (d.size > 0 && diskBytes < d.size &&
+                       d.type == FsNodeData::File);
         QString extra;
         if (d.type == FsNodeData::Symlink && !d.symlinkTarget.isEmpty())
             extra = QString("<br>Target: <code>%1</code>").arg(d.symlinkTarget.toHtmlEscaped());
+
+        // UX fix: show inline file preview (first 512 bytes) for regular files
+        QString contentBlock;
+        if (d.type == FsNodeData::File && d.size > 0) {
+            int fd = ::open(d.absPath.toLocal8Bit().constData(), O_RDONLY);
+            if (fd >= 0) {
+                char buf[512]{};
+                ssize_t nr = ::read(fd, buf, sizeof(buf) - 1);
+                ::close(fd);
+                if (nr > 0) {
+                    buf[nr] = '\0';
+                    // Determine if content looks like text (no null bytes in first read)
+                    bool isText = true;
+                    for (ssize_t i = 0; i < nr; ++i)
+                        if (buf[i] == '\0') { isText = false; break; }
+                    QString preview;
+                    if (isText) {
+                        preview = QString::fromLocal8Bit(buf, nr).toHtmlEscaped();
+                    } else {
+                        // Hex dump: 16 bytes per line
+                        QString hex;
+                        for (ssize_t i = 0; i < nr; ++i) {
+                            hex += QString("%1 ").arg((unsigned char)buf[i], 2, 16, QChar('0'));
+                            if ((i + 1) % 16 == 0) hex += "\n";
+                        }
+                        preview = hex.toHtmlEscaped();
+                    }
+                    QString truncNote = (nr == 512 && d.size > 512)
+                        ? QString("<br><span style='color:#94A3B8;font-size:10px;'>"
+                                  "…%1 more bytes…</span>").arg(d.size - 512)
+                        : QString();
+                    contentBlock = QString(
+                        "<br><b>Content preview:</b><br>"
+                        "<pre style='font-family:Consolas;font-size:10px;"
+                        "background:#F7F8FA;border:1px solid #E5E7EB;"
+                        "border-radius:6px;padding:8px;max-height:120px;"
+                        "overflow:auto;white-space:pre-wrap;'>%1</pre>%2"
+                    ).arg(preview).arg(truncNote);
+                }
+            }
+        }
+
         emit explanationNeeded(QString(
             "<b>%1</b><br><br>"
-            "Type: <b>%2</b><br>"
-            "Inode: <b>%3</b><br>"
-            "Link count: <b>%4</b>%5<br><br>"
-            "<b>What does link count mean?</b><br>"
-            "Every directory entry pointing to this inode increments <code>st_nlink</code>. "
-            "A link count &gt; 1 on a regular file means it has multiple hard links — "
-            "they all share the same data blocks. Deleting one name does not free the data "
-            "until the count reaches zero.<br><br>"
+            "Type: <b>%2</b>&nbsp;&nbsp;"
+            "Inode: <b>%3</b>&nbsp;&nbsp;"
+            "Link count: <b>%4</b>%5<br>"
+            "Permissions: <code>%6</code> (%7 octal)&nbsp;&nbsp;"
+            "Owner: <b>%8</b> (uid %9)<br>"
+            "Apparent size: <b>%10 B</b>&nbsp;&nbsp;"
+            "Disk blocks: <b>%11 × 512 = %12 B</b>%13"
+            "%14"
+            "<br><b>Permissions (chmod/chown):</b><br>"
+            "Select the node and click <b>chmod</b> to call <code>chmod()</code> — "
+            "set to <code>000</code> and then try Read to see <code>EACCES</code> for real.<br><br>"
+            "<b>Disk blocks vs apparent size:</b><br>"
+            "<code>st_blocks</code> = real 512-byte blocks on disk. "
+            "<code>st_size</code> = apparent byte count. "
+            "For sparse files <code>st_size ≫ st_blocks × 512</code> — the hole "
+            "is not stored on disk at all. <code>ls -l</code> shows apparent size; "
+            "<code>du</code> shows disk usage.<br><br>"
             "<b>Relevant syscalls:</b><br>"
-            "• <code>stat(\"%1\", &st)</code> → inode, nlinks, size<br>"
-            "• <code>link(old, new)</code> → create hard link<br>"
-            "• <code>symlink(target, linkname)</code> → create symbolic link<br>"
-            "• <code>unlink(path)</code> → remove name; data freed when nlinks==0"
-        ).arg(d.absPath).arg(typeStr).arg(d.inode).arg(d.nlinks).arg(extra));
+            "• <code>stat(path, &st)</code> → mode, uid, inode, size, blocks<br>"
+            "• <code>chmod(path, mode)</code> → change permission bits<br>"
+            "• <code>chown(path, uid, gid)</code> → change ownership<br>"
+            "• <code>lseek(fd, offset, SEEK_SET)</code> + <code>write()</code> → create holes<br>"
+            "• <code>flock(fd, LOCK_EX)</code> → acquire exclusive advisory lock"
+        ).arg(d.absPath).arg(typeStr).arg(d.inode).arg(d.nlinks).arg(extra)
+         .arg(permStr(d.mode)).arg(QString::number(d.mode & 0777, 8).rightJustified(3,'0'))
+         .arg(ownerStr).arg(d.uid)
+         .arg(d.size).arg(d.blocks).arg(diskBytes)
+         .arg(sparse ? " <span style='color:#7C3AED;font-weight:bold;'>(SPARSE)</span>" : "")
+         .arg(contentBlock));
     });
 
     // inotify poll timer
     inotifyTimer = new QTimer(this);
     connect(inotifyTimer, &QTimer::timeout, this, &FilesystemLab::onInotifyReady);
 
-    // Fix 1: /proc refresh timer — every 2.5 seconds
+    // /proc refresh timer — every 2.5 seconds
     procRefreshTimer = new QTimer(this);
     procRefreshTimer->setInterval(2500);
     connect(procRefreshTimer, &QTimer::timeout, this, &FilesystemLab::onProcRefreshTimer);
 
+    // /proc/fd edge timer — every 1 second
+    procFdTimer = new QTimer(this);
+    procFdTimer->setInterval(1000);
+    connect(procFdTimer, &QTimer::timeout, this, &FilesystemLab::onProcFdTimer);
+
     buildProcTree();
     procRefreshTimer->start();
+    procFdTimer->start();
 
     // Set up sandbox
     QString sandboxPath = QStandardPaths::writableLocation(QStandardPaths::HomeLocation)
                         + "/.learnos/fslab_sandbox";
     fsCanvas->setSandboxRoot(sandboxPath);
-    sandboxStatusLabel->setText("Sandbox: " + sandboxPath);
+    sandboxStatusLabel->setText(sandboxPath);
 
     // Auto-start watching /tmp so events are visible immediately on first open.
     onWatchPath();
@@ -432,6 +583,11 @@ FilesystemLab::FilesystemLab(QWidget* parent) : QWidget(parent) {
 FilesystemLab::~FilesystemLab() {
     onStopWatching();
     procRefreshTimer->stop();
+    procFdTimer->stop();
+}
+
+void FilesystemLab::setSandboxPids(const std::vector<pid_t>& pids) {
+    m_sandboxPids = pids;
 }
 
 // ── inotify watch ─────────────────────────────────────────────────────────────
@@ -880,4 +1036,52 @@ void FilesystemLab::onTreeItemDoubleClicked(QTreeWidgetItem* item, int) {
             "<b>Note:</b> Most parameters reset to defaults on reboot. "
             "To make permanent, add to <code>/etc/sysctl.conf</code>."
           ).arg(path).arg(current).arg(newVal.trimmed()).arg(original));
+}
+
+// ── /proc/fd edge refresh ─────────────────────────────────────────────────────
+
+void FilesystemLab::onProcFdTimer() {
+    if (!fsCanvas) return;
+    fsCanvas->updateProcFdEdges(m_sandboxPids);
+    // Count how many sandbox files are externally open — for the badge
+    // (FsCanvas tracks this internally; we just update the label from it)
+    int count = 0;
+    QString root = fsCanvas->sandboxRoot();
+    // Walk /proc/<pid>/fd for each pid and count hits inside sandbox
+    for (pid_t pid : m_sandboxPids) {
+        QString fdDir = QString("/proc/%1/fd").arg(pid);
+        QDir dir(fdDir);
+        if (!dir.exists()) continue;
+        dir.setFilter(QDir::Files | QDir::System | QDir::NoDotAndDotDot);
+        for (const QFileInfo& fi : dir.entryInfoList()) {
+            char tgt[PATH_MAX]{};
+            ssize_t r = ::readlink(
+                (fdDir + "/" + fi.fileName()).toLocal8Bit().constData(),
+                tgt, sizeof(tgt)-1);
+            if (r > 0 && QString::fromLocal8Bit(tgt, r).startsWith(root))
+                count++;
+        }
+    }
+    procFdLabel->setText(QString("⚙ %1 ext FD%2").arg(count).arg(count == 1 ? "" : "s"));
+    if (count > 0)
+        procFdLabel->setStyleSheet(
+            "color:#7C3AED;background:#F5F3FF;border-radius:6px;"
+            "padding:2px 8px;font-size:10px;font-weight:bold;"
+            "border:1px solid #DDD6FE;");
+    else
+        procFdLabel->setStyleSheet(
+            "color:#94A3B8;background:#F8FAFC;border-radius:6px;"
+            "padding:2px 8px;font-size:10px;font-weight:bold;");
+}
+
+// ── O_DIRECT toggle ───────────────────────────────────────────────────────────
+
+void FilesystemLab::onODirectToggled() {
+    fsCanvas->doToggleODirect();
+    // Flip the button label to reflect the next mode
+    bool nowDirect = oDirect->text().contains("Buffered");
+    oDirect->setText(nowDirect ? "⚡ O_DIRECT" : "⚡ Buffered I/O");
+    oDirect->setToolTip(nowDirect
+        ? "O_DIRECT active — next Read bypasses page cache"
+        : "Buffered I/O active — next Read uses page cache");
 }

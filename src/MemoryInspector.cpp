@@ -253,8 +253,8 @@ std::vector<MemRegion> MemoryInspector::readMemMap(pid_t pid) {
         MemRegion r;
         unsigned long start, end;
         char perms[8], label[256] = "";
-        unsigned long offset; int dev1, dev2; unsigned long inode;
-        int parsed = sscanf(line.c_str(), "%lx-%lx %s %lx %x:%x %lu %255s",
+        unsigned long offset; unsigned int dev1, dev2; unsigned long inode;
+        int parsed = sscanf(line.c_str(), "%lx-%lx %7s %lx %x:%x %lu %255s",
                             &start, &end, perms, &offset, &dev1, &dev2, &inode, label);
         r.start  = start;
         r.end    = end;

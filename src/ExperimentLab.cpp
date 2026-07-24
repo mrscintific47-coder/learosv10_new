@@ -230,11 +230,11 @@ void KernelParamsPanel::onSchedLatencyChanged(int v) {
 void KernelParamsPanel::onOvercommitChanged(int idx) {
     ExperimentManager::get().setOvercommit(idx);
 }
-void KernelParamsPanel::onParamChanged(QString param, QString value) {
+void KernelParamsPanel::onParamChanged(QString /*param*/, QString /*value*/) {
     permissionStatus->setVisible(false);
     refreshValues();
 }
-void KernelParamsPanel::onWriteFailed(QString param, QString attemptedValue) {
+void KernelParamsPanel::onWriteFailed(QString param, QString /*attemptedValue*/) {
     permissionStatus->setText(QString(
         "⚠ Couldn't write %1 — permission denied. LearnOS needs root to actually "
         "change kernel parameters (try running it with sudo, or via pkexec). "
@@ -452,11 +452,9 @@ void ExperimentLab::onExperimentSelected(int idx) {
     algoBox->setVisible(isScheduler);
 }
 
-void ExperimentLab::onAlgoChanged(int idx) {
-    static const char* algos[] = {"fcfs","rr","priority","sjf"};
-    if (idx >= 0 && idx < 4) {
-        // Update current experiment's algo
-    }
+void ExperimentLab::onAlgoChanged(int /*idx*/) {
+    // No-op: the selected algorithm is read directly from algoBox in
+    // onRunExperiment() when a run starts, so nothing needs to happen here.
 }
 
 void ExperimentLab::onRunExperiment() {

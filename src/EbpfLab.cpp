@@ -273,9 +273,17 @@ bool EbpfLab::openPerfCounters() {
         c.delta = 0;
         c.fd    = fd;
         if (fd >= 0) {
-            ioctl(fd, PERF_EVENT_IOC_RESET,  0);
-            ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
-            anyOk = true;
+            bool resetOk  = ioctl(fd, PERF_EVENT_IOC_RESET,  0) == 0;
+            bool enableOk = ioctl(fd, PERF_EVENT_IOC_ENABLE, 0) == 0;
+            if (resetOk && enableOk) {
+                anyOk = true;
+            } else {
+                // fd opened but the counter can't actually be armed (seen under
+                // stricter perf_event_paranoid settings) — don't pretend it's
+                // live, or the UI would show "active" while value never moves.
+                ::close(fd);
+                c.fd = -1;
+            }
         }
         counters.append(c);
     }
@@ -389,7 +397,7 @@ void EbpfLab::refreshCounterTable() {
 
 // ── Ftrace ────────────────────────────────────────────────────────────────────
 
-QString EbpfLab::enableFtrace(const QString& probe) {
+QString EbpfLab::enableFtrace() {
     // Find tracefs
     static const QStringList tracefsRoots = {
         "/sys/kernel/debug/tracing",
@@ -416,6 +424,7 @@ QString EbpfLab::enableFtrace(const QString& probe) {
         "syscalls:sys_enter_write",
         "syscalls:sys_enter_mmap",
         "kmem:kmalloc",
+        "raw_syscalls:sys_enter",
     };
 
     // Enable tracing — if this silently fails, tracing_on stays 0 and no
@@ -499,7 +508,7 @@ void EbpfLab::disableFtrace() {
 }
 
 void EbpfLab::onStartFtrace() {
-    QString err = enableFtrace(probeBox->currentText());
+    QString err = enableFtrace();
     if (!err.isEmpty()) {
         statusLabel->setText("⚠ ftrace failed: " + err);
         emit explanationNeeded(QString(

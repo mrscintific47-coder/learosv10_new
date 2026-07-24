@@ -206,6 +206,9 @@ void MainWindow::connectSignals() {
             algoStepper,    &AlgorithmStepper::loadProcesses);
     connect(sandboxManager, &SandboxManager::processesChanged,
             signalPanel,    &SignalPanel::setSandboxPids);
+    // Bug fix: forward sandbox PIDs so FilesystemLab can draw /proc/fd edges
+    connect(sandboxManager, &SandboxManager::processesChanged,
+            filesystemLab,  &FilesystemLab::setSandboxPids);
 
     // Sandbox process selected → load process stack in DS Lab + show memory map
     connect(sandboxManager, &SandboxManager::processSelected,

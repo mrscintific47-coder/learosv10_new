@@ -95,7 +95,7 @@ private:
     // debugfs-not-mounted, permission-denied, and tracing_on-failed are all
     // different problems with different fixes, so they must not be collapsed
     // into one generic "mount debugfs" message.
-    QString enableFtrace(const QString& probe);
+    QString enableFtrace();
     void disableFtrace();
     void readCounters();
     void refreshCounterTable();

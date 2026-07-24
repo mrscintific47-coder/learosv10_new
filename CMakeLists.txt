@@ -2,6 +2,11 @@ cmake_minimum_required(VERSION 3.16)
 project(LearnOS)
 
 set(CMAKE_CXX_STANDARD 17)
+
+if(NOT CMAKE_CXX_FLAGS MATCHES "-Wall")
+    add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
@@ -88,8 +93,12 @@ target_link_libraries(sched_worker Threads::Threads)
 set_target_properties(sched_worker PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:LearnOS>)
 
+add_executable(fslab_worker tools/fslab_worker.cpp)
+set_target_properties(fslab_worker PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:LearnOS>)
+
 # Install targets
-install(TARGETS LearnOS memlab_worker dslab_worker learnos_thread_worker sched_worker
+install(TARGETS LearnOS memlab_worker dslab_worker learnos_thread_worker sched_worker fslab_worker
     RUNTIME DESTINATION bin)
 
 # ── Automated tests ────────────────────────────────────────────────────────────
