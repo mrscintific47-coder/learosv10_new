@@ -6,6 +6,8 @@
 #include <QFileInfo>
 #include <QPainterPath>
 #include <QProcess>
+#include <QScrollArea>
+#include <QFrame>
 #include <fstream>
 #include <sstream>
 #include <sys/wait.h>
@@ -141,7 +143,9 @@ void NsTreeView::paintEvent(QPaintEvent*) {
 
 NamespaceLab::NamespaceLab(QWidget* parent) : QWidget(parent) {
     setStyleSheet(QString("background:%1;").arg(Theme::BG_APP));
-    auto* outer = new QVBoxLayout(this);
+    auto* content = new QWidget();
+    content->setStyleSheet(QString("background:%1;").arg(Theme::BG_APP));
+    auto* outer = new QVBoxLayout(content);
     outer->setContentsMargins(16,16,16,16);
     outer->setSpacing(10);
 
@@ -277,6 +281,16 @@ NamespaceLab::NamespaceLab(QWidget* parent) : QWidget(parent) {
     refreshTimer->start(2000);
 
     onNsTypeChanged(0);
+
+    auto* scroll = new QScrollArea(this);
+    scroll->setWidget(content);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setStyleSheet("QScrollArea{border:none;background:transparent;}" + Theme::scrollbar());
+    auto* rootLayout = new QVBoxLayout(this);
+    rootLayout->setContentsMargins(0, 0, 0, 0);
+    rootLayout->addWidget(scroll);
 }
 
 NamespaceLab::~NamespaceLab() {

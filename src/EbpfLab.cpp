@@ -3,6 +3,8 @@
 #include "Theme.h"
 #include <QHeaderView>
 #include <QPainterPath>
+#include <QScrollArea>
+#include <QFrame>
 #include <QFile>
 #include <QFileInfo>
 #include <QTextCursor>
@@ -101,7 +103,9 @@ static long perf_event_open(struct perf_event_attr* hw_event, pid_t pid,
 
 EbpfLab::EbpfLab(QWidget* parent) : QWidget(parent) {
     setStyleSheet(QString("background:%1;").arg(Theme::BG_APP));
-    auto* outer = new QVBoxLayout(this);
+    auto* content = new QWidget();
+    content->setStyleSheet(QString("background:%1;").arg(Theme::BG_APP));
+    auto* outer = new QVBoxLayout(content);
     outer->setContentsMargins(16,16,16,16);
     outer->setSpacing(10);
 
@@ -228,6 +232,16 @@ EbpfLab::EbpfLab(QWidget* parent) : QWidget(parent) {
             this, &EbpfLab::onProbeChanged);
 
     onProbeChanged(0);
+
+    auto* scroll = new QScrollArea(this);
+    scroll->setWidget(content);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setStyleSheet("QScrollArea{border:none;background:transparent;}" + Theme::scrollbar());
+    auto* rootLayout = new QVBoxLayout(this);
+    rootLayout->setContentsMargins(0, 0, 0, 0);
+    rootLayout->addWidget(scroll);
 }
 
 EbpfLab::~EbpfLab() {

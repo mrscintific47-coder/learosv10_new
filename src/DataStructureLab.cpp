@@ -4,6 +4,8 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QSplitter>
+#include <QScrollArea>
+#include <QFrame>
 #include <QPainterPath>
 #include <QFont>
 #include <algorithm>
@@ -1150,7 +1152,9 @@ DataStructureLab::DataStructureLab(QWidget* parent) : QWidget(parent) {
     buckets.resize(BUCKET_COUNT, nullptr);
 
     setStyleSheet(QString("background: %1;").arg(Theme::BG_APP));
-    auto* outerLayout = new QVBoxLayout(this);
+    auto* content = new QWidget();
+    content->setStyleSheet(QString("background: %1;").arg(Theme::BG_APP));
+    auto* outerLayout = new QVBoxLayout(content);
     outerLayout->setContentsMargins(16, 16, 16, 16);
     outerLayout->setSpacing(12);
 
@@ -1324,6 +1328,16 @@ DataStructureLab::DataStructureLab(QWidget* parent) : QWidget(parent) {
 
     updateControlsForType();
     refreshView();
+
+    auto* scroll = new QScrollArea(this);
+    scroll->setWidget(content);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setStyleSheet("QScrollArea{border:none;background:transparent;}" + Theme::scrollbar());
+    auto* rootLayout = new QVBoxLayout(this);
+    rootLayout->setContentsMargins(0, 0, 0, 0);
+    rootLayout->addWidget(scroll);
 }
 
 DataStructureLab::~DataStructureLab() {

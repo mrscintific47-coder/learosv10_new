@@ -4,12 +4,16 @@
 #include <fstream>
 #include <sstream>
 #include <QFont>
+#include <QScrollArea>
+#include <QFrame>
 
 CpuMemMonitor::CpuMemMonitor(QWidget* parent)
     : QWidget(parent), tick(0), prevIdle(0), prevTotal(0)
 {
     setStyleSheet(QString("background:%1;").arg(Theme::BG_APP));
-    auto* outer = new QVBoxLayout(this);
+    auto* content = new QWidget();
+    content->setStyleSheet(QString("background:%1;").arg(Theme::BG_APP));
+    auto* outer = new QVBoxLayout(content);
     outer->setContentsMargins(16, 16, 16, 16);
     outer->setSpacing(12);
 
@@ -104,6 +108,16 @@ CpuMemMonitor::CpuMemMonitor(QWidget* parent)
     connect(refreshTimer, &QTimer::timeout, this, &CpuMemMonitor::refresh);
     refreshTimer->start(1000);
     refresh();
+
+    auto* scroll = new QScrollArea(this);
+    scroll->setWidget(content);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setStyleSheet("QScrollArea{border:none;background:transparent;}" + Theme::scrollbar());
+    auto* rootLayout = new QVBoxLayout(this);
+    rootLayout->setContentsMargins(0, 0, 0, 0);
+    rootLayout->addWidget(scroll);
 }
 
 QChartView* CpuMemMonitor::makeChart(QChart* chart, QLineSeries* series,

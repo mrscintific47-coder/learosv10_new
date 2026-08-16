@@ -8,6 +8,8 @@
 #include <QFileInfo>
 #include <QPainterPath>
 #include <QScrollBar>
+#include <QScrollArea>
+#include <QFrame>
 #include <QDateTime>
 #include <QStandardPaths>
 #include <QIcon>
@@ -178,7 +180,9 @@ QString FilesystemLab::explanationForProcPath(const QString& path,
 
 FilesystemLab::FilesystemLab(QWidget* parent) : QWidget(parent) {
     setStyleSheet(QString("background:%1;").arg(Theme::BG_APP));
-    auto* outer = new QVBoxLayout(this);
+    auto* content = new QWidget();
+    content->setStyleSheet(QString("background:%1;").arg(Theme::BG_APP));
+    auto* outer = new QVBoxLayout(content);
     outer->setContentsMargins(16,16,16,16);
     outer->setSpacing(10);
 
@@ -578,6 +582,16 @@ FilesystemLab::FilesystemLab(QWidget* parent) : QWidget(parent) {
 
     // Auto-start watching /tmp so events are visible immediately on first open.
     onWatchPath();
+
+    auto* scroll = new QScrollArea(this);
+    scroll->setWidget(content);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setStyleSheet("QScrollArea{border:none;background:transparent;}" + Theme::scrollbar());
+    auto* rootLayout = new QVBoxLayout(this);
+    rootLayout->setContentsMargins(0, 0, 0, 0);
+    rootLayout->addWidget(scroll);
 }
 
 FilesystemLab::~FilesystemLab() {

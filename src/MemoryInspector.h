@@ -5,6 +5,9 @@
 #include <QVBoxLayout>
 #include <QTimer>
 #include <QPainter>
+#include <QMouseEvent>
+#include <QWheelEvent>
+#include <QToolTip>
 #include <vector>
 #include <string>
 #include <unistd.h>
@@ -17,22 +20,48 @@ struct MemRegion {
     unsigned long sizeKB;
 };
 
-// Draws the memory map of one process as colored blocks
+// Draws the memory map of one process as colored blocks.
+// Supports wheel/pinch zoom and click+drag pan.
+// +/- zoom buttons are provided by the containing layout (see MemoryInspector).
+// Hover shows a tooltip with region details.
 class MemMapWidget : public QWidget {
     Q_OBJECT
 public:
     explicit MemMapWidget(QWidget* parent = nullptr);
     void setRegions(const std::vector<MemRegion>& regions, long totalKB);
+
+    // Zoom controls for eglfs / touchscreen fallback
+    void zoomIn();
+    void zoomOut();
+    void resetZoom();
+
 signals:
     void regionClicked(MemRegion region);
+
 protected:
     void paintEvent(QPaintEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
+    void mouseMoveEvent(QMouseEvent*) override;
+    void mouseReleaseEvent(QMouseEvent*) override;
+    void wheelEvent(QWheelEvent*) override;
+
 private:
     std::vector<MemRegion> regions;
-    std::vector<QRect>     rects;
-    long totalKB = 0;
-    QColor regionColor(const MemRegion& r);
+    std::vector<QRect>     rects;   // in logical (zoomed+panned) coordinates
+    long totalKB  = 0;
+
+    // Zoom / pan state
+    double zoomFactor = 1.0;   // 1.0 = fit-to-width; > 1 zooms in
+    int    panOffset  = 0;     // horizontal scroll in pixels at zoom==1
+    bool   panning    = false;
+    int    panStartX  = 0;
+    int    panOffsetAtStart = 0;
+
+    QColor regionColor(const MemRegion& r) const;
+    // Returns the MemRegion under the given widget position, or nullptr.
+    const MemRegion* regionAt(QPoint pos) const;
+    // Clamp panOffset so we never scroll past the content.
+    void clampPan();
 };
 
 class MemoryInspector : public QWidget {
@@ -51,9 +80,9 @@ private slots:
     void refresh();
     void onRegionClicked(MemRegion r);
 private:
-    QLabel*      titleLabel;
+    QLabel*       titleLabel;
     MemMapWidget* mapWidget;
-    QLabel*      statsLabel;
-    QTimer*      refreshTimer;
-    pid_t        currentPid = -1;
+    QLabel*       statsLabel;
+    QTimer*       refreshTimer;
+    pid_t         currentPid = -1;
 };

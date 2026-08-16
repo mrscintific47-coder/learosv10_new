@@ -2,6 +2,8 @@
 #include "CleanupRegistry.h"
 #include "EventBus.h"
 #include "Theme.h"
+#include <QScrollArea>
+#include <QFrame>
 #include <sys/wait.h>
 #include <sys/resource.h>
 #include <unistd.h>
@@ -12,7 +14,9 @@
 
 SandboxManager::SandboxManager(QWidget* parent) : QWidget(parent) {
     setStyleSheet(QString("background: %1;").arg(Theme::BG_APP));
-    auto* layout = new QVBoxLayout(this);
+    auto* content = new QWidget();
+    content->setStyleSheet(QString("background: %1;").arg(Theme::BG_APP));
+    auto* layout = new QVBoxLayout(content);
     layout->setContentsMargins(16,16,16,16);
     layout->setSpacing(12);
 
@@ -116,6 +120,16 @@ SandboxManager::SandboxManager(QWidget* parent) : QWidget(parent) {
     auto* zombieTimer = new QTimer(this);
     connect(zombieTimer, &QTimer::timeout, this, &SandboxManager::onZombieReap);
     zombieTimer->start(1500);
+
+    auto* scroll = new QScrollArea(this);
+    scroll->setWidget(content);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setStyleSheet("QScrollArea{border:none;background:transparent;}" + Theme::scrollbar());
+    auto* rootLayout = new QVBoxLayout(this);
+    rootLayout->setContentsMargins(0, 0, 0, 0);
+    rootLayout->addWidget(scroll);
 }
 
 SandboxManager::~SandboxManager() {

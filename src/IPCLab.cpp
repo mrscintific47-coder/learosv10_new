@@ -6,6 +6,7 @@
 #include <QHeaderView>
 #include <QSplitter>
 #include <QScrollArea>
+#include <QFrame>
 #include <sys/wait.h>
 #include <sys/shm.h>
 #include <sys/mman.h>
@@ -182,7 +183,9 @@ void IPCFlowView::paintEvent(QPaintEvent*) {
 
 IPCLab::IPCLab(QWidget* parent) : QWidget(parent) {
     setStyleSheet(QString("background:%1;").arg(Theme::BG_APP));
-    auto* outer = new QVBoxLayout(this);
+    auto* content = new QWidget();
+    content->setStyleSheet(QString("background:%1;").arg(Theme::BG_APP));
+    auto* outer = new QVBoxLayout(content);
     outer->setContentsMargins(16,16,16,16);
     outer->setSpacing(10);
 
@@ -322,6 +325,16 @@ IPCLab::IPCLab(QWidget* parent) : QWidget(parent) {
     refreshTimer = new QTimer(this);
     connect(refreshTimer, &QTimer::timeout, this, &IPCLab::onRefresh);
     refreshTimer->start(1000);
+
+    auto* scroll = new QScrollArea(this);
+    scroll->setWidget(content);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setStyleSheet("QScrollArea{border:none;background:transparent;}" + Theme::scrollbar());
+    auto* rootLayout = new QVBoxLayout(this);
+    rootLayout->setContentsMargins(0, 0, 0, 0);
+    rootLayout->addWidget(scroll);
 }
 
 IPCLab::~IPCLab() {

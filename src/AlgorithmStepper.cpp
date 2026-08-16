@@ -2,6 +2,8 @@
 #include "EventBus.h"
 #include "Theme.h"
 #include <QHeaderView>
+#include <QScrollArea>
+#include <QFrame>
 #include <QFont>
 #include <sys/resource.h>
 #include <signal.h>
@@ -20,7 +22,9 @@ AlgorithmStepper::AlgorithmStepper(QWidget* parent)
     : QWidget(parent), tick(0), quantum(3), currentSlot(0)
 {
     setStyleSheet(QString("background:%1;").arg(Theme::BG_APP));
-    auto* outer = new QVBoxLayout(this);
+    auto* content = new QWidget();
+    content->setStyleSheet(QString("background:%1;").arg(Theme::BG_APP));
+    auto* outer = new QVBoxLayout(content);
     outer->setContentsMargins(16, 16, 16, 16);
     outer->setSpacing(12);
 
@@ -200,6 +204,16 @@ AlgorithmStepper::AlgorithmStepper(QWidget* parent)
     connect(resetBtn,   &QPushButton::clicked, this, &AlgorithmStepper::resetScheduler);
     connect(algoBox,    &QComboBox::currentTextChanged, this, &AlgorithmStepper::onAlgoChanged);
     connect(speedSlider,&QSlider::valueChanged, this, &AlgorithmStepper::onSpeedChanged);
+
+    auto* scroll = new QScrollArea(this);
+    scroll->setWidget(content);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setStyleSheet("QScrollArea{border:none;background:transparent;}" + Theme::scrollbar());
+    auto* rootLayout = new QVBoxLayout(this);
+    rootLayout->setContentsMargins(0, 0, 0, 0);
+    rootLayout->addWidget(scroll);
 }
 
 void AlgorithmStepper::loadProcesses(const std::vector<pid_t>& pids) {

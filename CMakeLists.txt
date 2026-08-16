@@ -26,6 +26,8 @@ add_executable(LearnOS
     src/MemoryInspector.cpp
     src/MemoryLab.cpp
     src/MemoryLabDriver.cpp
+    src/MemoryTableWidget.cpp
+    src/TimeScrubber.cpp
     src/DataStructureLab.cpp
     src/DSLabDriver.cpp
     src/IPCLab.cpp
