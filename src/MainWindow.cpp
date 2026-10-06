@@ -27,7 +27,7 @@ void MainWindow::setupUI() {
     // LEFT SIDEBAR — dark navy, always visible
     // ══════════════════════════════════════════════════════════════════════════
     auto* sidebar = new QWidget();
-    sidebar->setFixedWidth(270);
+    sidebar->setFixedWidth(280);
     sidebar->setStyleSheet(QString("background: %1;").arg(Theme::BG_SIDEBAR));
 
     auto* sideLayout = new QVBoxLayout(sidebar);
@@ -99,9 +99,6 @@ void MainWindow::setupUI() {
     topRow->setContentsMargins(20, 0, 16, 0);
     topRow->setSpacing(10);
 
-    auto* appDot = new QLabel("⬡");
-    appDot->setStyleSheet("color: #4F6EF7; font-size: 16px;");
-
     auto* pageTitle = new QLabel("Linux Systems Laboratory");
     pageTitle->setStyleSheet(
         "color: #0F172A; font-size: 14px; font-weight: 800; letter-spacing: -0.01em;");
@@ -116,8 +113,6 @@ void MainWindow::setupUI() {
         "color: #DC2626; background: #FEF2F2; border-radius: 6px;"
         "padding: 3px 9px; font-size: 10px; font-weight: 700;");
 
-    topRow->addWidget(appDot);
-    topRow->addSpacing(4);
     topRow->addWidget(pageTitle);
     topRow->addStretch();
     topRow->addWidget(kaliTag);
@@ -179,7 +174,7 @@ void MainWindow::setupUI() {
 
     // Status bar
     statusBar()->showMessage(
-        "  LearnOS v10   ·   live /proc data   ·   real kernel syscalls   ·   Scheduler tab = algorithm visualiser only");
+        "  LearnOS v10  ·  live /proc data  ·  real kernel syscalls  ·  Scheduler = algorithm visualiser  ·  Mem Lab = 4 MB mmap sandbox");
 
     heatMapDriver = new HeatMapDriver(heatMap, this);
 }

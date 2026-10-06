@@ -35,13 +35,18 @@ ActivityFeed::ActivityFeed(QWidget* parent) : QWidget(parent) {
 
     list = new QListWidget();
     list->setStyleSheet(
-        "QListWidget{background:#1E293B;border:1px solid #334155;border-radius:8px;"
-        "font-size:10px;font-family:Consolas;color:#CBD5E1;}"
-        "QListWidget::item{padding:3px 6px;border-bottom:1px solid #1E293B;}"
-        "QListWidget::item:selected{background:#334155;color:#F1F5F9;}"
-        "QScrollBar:vertical{background:#1E293B;width:4px;border-radius:2px;}"
-        "QScrollBar::handle:vertical{background:#475569;border-radius:2px;}"
-        "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}");
+        "QListWidget {"
+        "  background:#1E293B; border:1px solid #334155; border-radius:8px;"
+        "  font-size:10px; font-family:'Consolas','Fira Code',monospace;"
+        "  color:#CBD5E1; outline:none; }"
+        "QListWidget::item {"
+        "  padding:4px 8px; border-bottom:1px solid #252D3D; }"
+        "QListWidget::item:selected {"
+        "  background:#334155; color:#F1F5F9; border-radius:4px; }"
+        "QListWidget::item:hover:!selected { background:#253044; }"
+        "QScrollBar:vertical { background:#1E293B; width:4px; border-radius:2px; margin:0; }"
+        "QScrollBar::handle:vertical { background:#475569; border-radius:2px; min-height:20px; }"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }");
     list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     layout->addWidget(list, 1);
 

@@ -31,11 +31,14 @@ struct StructNode {
 
 // ── Arena summary ─────────────────────────────────────────────────────────────
 struct ArenaSummary {
-    long    totalBytes  = 0;
-    long    usedBytes   = 0;
-    long    freeBytes   = 0;
-    int     blockCount  = 0;
-    QString modeName;   // "contiguous", "paged", "segmented", "framed"
+    long    totalBytes    = 0;
+    long    usedBytes     = 0;
+    long    freeBytes     = 0;
+    int     blockCount    = 0;
+    QString modeName;     // "contiguous", "paged", "segmented", "framed"
+    long    largestHole   = 0;  // bytes in the biggest free contiguous region
+    int     holeCount     = 0;  // number of free holes / free page-runs
+    long    internalWaste = 0;  // bytes wasted to alignment/page rounding
 };
 
 // ── Page table entry ──────────────────────────────────────────────────────────
@@ -131,7 +134,6 @@ private:
     ArenaBlock              pendingStructBlock;
     std::vector<StructNode> pendingNodes;
     bool                    inStructDef = false;
-    int                     expectedNodes = 0;
 
     // Page/seg/frame table accumulation
     std::vector<PageEntry>  pendingPageTable;

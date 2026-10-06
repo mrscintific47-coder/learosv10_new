@@ -28,7 +28,6 @@ void MemoryLabDriver::start() {
     prevBlocks_.clear();
     pendingLabel_.clear();
     inStructDef   = false;
-    expectedNodes = 0;
     proc->start(findWorker(), {});
     if (proc->state() != QProcess::NotRunning) {
         qpid = proc->processId();
@@ -170,7 +169,6 @@ void MemoryLabDriver::processLine(const QString& line) {
             pendingStructBlock.used       = true;
             pendingNodes.clear();
             inStructDef   = true;
-            expectedNodes = pendingStructBlock.elemCount;
         }
         return;
     }
@@ -205,7 +203,7 @@ void MemoryLabDriver::processLine(const QString& line) {
         return;
     }
 
-    // ── ARENA <total> <used> <free> <count> <mode> ──
+    // ── ARENA <total> <used> <free> <count> <mode> [largestHole] [holeCount] [internalWaste] ──
     if (line.startsWith("ARENA")) {
         QStringList p = line.split(' ', Qt::SkipEmptyParts);
         ArenaSummary s;
@@ -215,6 +213,11 @@ void MemoryLabDriver::processLine(const QString& line) {
             s.freeBytes  = p[3].toLong();
             s.blockCount = p[4].toInt();
             s.modeName   = p[5];
+        }
+        if (p.size() >= 9) {
+            s.largestHole   = p[6].toLong();
+            s.holeCount     = p[7].toInt();
+            s.internalWaste = p[8].toLong();
         }
 
         // Flush pending struct first (so it's in prevBlocks_ for next diff)

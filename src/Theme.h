@@ -112,8 +112,19 @@ namespace Theme {
             "  background: #EA580C; color: white; border: none;"
             "  border-radius: 8px; padding: 8px 18px;"
             "  font-size: 12px; font-weight: 700; }"
-            "QPushButton:hover   { background: #C2410C; }"
-            "QPushButton:pressed { background: #9A3412; }";
+            "QPushButton:hover    { background: #C2410C; }"
+            "QPushButton:pressed  { background: #9A3412; }"
+            "QPushButton:disabled { background: #FDBA74; color: #FFF7ED; }";
+    }
+    inline QString btnSecondary() {
+        return
+            "QPushButton {"
+            "  background: #F1F5F9; color: #334155; border: none;"
+            "  border-radius: 8px; padding: 8px 18px;"
+            "  font-size: 12px; font-weight: 700; }"
+            "QPushButton:hover    { background: #E2E8F0; color: #0F172A; }"
+            "QPushButton:pressed  { background: #CBD5E1; }"
+            "QPushButton:disabled { background: #F8FAFC; color: #94A3B8; }";
     }
 
     // ── Tab bar — taller, bolder selected state ───────────────────────────────
@@ -264,5 +275,29 @@ namespace Theme {
             "background: white;"
             "border-radius: 12px;"
             "border: 1px solid #E2E8F0;";
+    }
+
+    // ── Global tooltip ─────────────────────────────────────────────────────────
+    // Apply once to QApplication so every tooltip uses the design system.
+    inline const char* tooltip() {
+        return
+            "QToolTip {"
+            "  background: #1E293B; color: #F1F5F9;"
+            "  border: 1px solid #334155; border-radius: 6px;"
+            "  padding: 5px 9px; font-size: 11px; }"
+            "QToolTip QLabel { background: transparent; }";
+    }
+
+    // ── Group-box ─────────────────────────────────────────────────────────────
+    inline QString groupBox() {
+        return
+            "QGroupBox {"
+            "  background: white; border-radius: 10px;"
+            "  border: 1px solid #E2E8F0;"
+            "  margin-top: 18px; padding: 10px 12px 10px 12px; }"
+            "QGroupBox::title {"
+            "  subcontrol-origin: margin; subcontrol-position: top left;"
+            "  padding: 0 6px; color: #475569;"
+            "  font-size: 11px; font-weight: 700; }";
     }
 }

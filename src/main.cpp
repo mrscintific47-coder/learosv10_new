@@ -6,6 +6,7 @@
 #include <sys/shm.h>
 #include "CleanupRegistry.h"
 #include "MainWindow.h"
+#include "Theme.h"
 
 // ── Crash-safe cleanup ─────────────────────────────────────────────────────────
 // Resources are tracked in fixed-size C arrays (not std::vector) so the signal
@@ -91,6 +92,9 @@ int main(int argc, char* argv[]) {
     light.setColor(QPalette::ToolTipText,     QColor("#0F172A"));
     light.setColor(QPalette::PlaceholderText, QColor("#94A3B8"));
     app.setPalette(light);
+
+    // Apply global tooltip style from design system
+    app.setStyleSheet(Theme::tooltip());
 
     QFont font("Segoe UI", 10);
     font.setHintingPreference(QFont::PreferFullHinting);

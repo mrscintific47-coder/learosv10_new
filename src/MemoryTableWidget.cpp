@@ -33,13 +33,7 @@ MemoryTableWidget::MemoryTableWidget(QWidget* parent) : QWidget(parent) {
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
     table->setAlternatingRowColors(true);
     table->verticalHeader()->hide();
-    table->setStyleSheet(QString(
-        "QTableWidget { background:%1; color:%2; gridline-color:%3; font-size:12px; }"
-        "QTableWidget::item:selected { background:%4; color:white; }"
-        "QHeaderView::section { background:%1; color:%5; font-weight:600; "
-        "  padding:4px 8px; border:none; border-bottom:1px solid %3; }"
-    ).arg(Theme::BG_APP, Theme::TEXT_PRIMARY, Theme::BORDER,
-          "#3b82d4", Theme::TEXT_SECONDARY));
+    table->setStyleSheet(Theme::table());
     layout->addWidget(table, 1);
 }
 
@@ -95,8 +89,8 @@ void MemoryTableWidget::ensureRow(int id, const ArenaBlock& b) {
             item->setText(text);
         }
         item->setForeground(QColor(Theme::TEXT_PRIMARY));
-        // Restore live row background
-        item->setBackground(QColor(Theme::BG_APP));
+        // Restore live row background (white, matching the table's base)
+        item->setBackground(QColor(Theme::BG_CARD));
     };
 
     setCell(COL_ID,       QString::number(id),  Qt::AlignRight  | Qt::AlignVCenter);

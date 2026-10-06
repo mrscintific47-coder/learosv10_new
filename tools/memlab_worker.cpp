@@ -51,8 +51,8 @@
 // ── Response protocol ────────────────────────────────────────────────────────
 //  BLOCK <id> <offset> <size> <used 0|1> <label>
 //  STRUCTDEF <id> <type> <offset> <totalSize> <elementSize> <count> <label>
-//    (followed by NODE lines for LL/TREE, or just STRUCTDEF for ARRAY/HASH)
-//  NODE <structId> <nodeIdx> <offset>
+//    (followed by NODE lines for LL/TREE/HASH; ARRAY has no NODE lines)
+//  NODE <structId> <nodeIdx> <offset> [link1] [link2]
 //  ARENA <totalBytes> <usedBytes> <freeBytes> <blockCount> <mode>
 //  PAGETABLE_ENTRY <vpn> <frame> <present 0|1> <blockId>
 //  SEGTABLE_ENTRY <segName> <base> <limit> <blockId>
@@ -321,8 +321,63 @@ static void printArenaSummary() {
     size_t used = 0;
     for (auto& b : g_blocks) if (b.used) used += b.size;
     size_t free_ = SANDBOX_SIZE - used;
+
+    // Fragmentation stats (contiguous / segmented only — paged/framed have
+    // no external fragmentation by design; we still compute for display).
+    size_t largestHole   = 0;
+    int    holeCount     = 0;
+    size_t internalWaste = 0;
+
+    if (g_mode == Mode::Contiguous) {
+        // A "hole" is a free gap between live allocations, not the trailing
+        // free space after the last block. Only count holes when there is at
+        // least one live block so the empty-arena state shows holeCount=0.
+        if (used > 0) {
+            for (const auto& span : g_free) {
+                holeCount++;
+                if (span.size > largestHole) largestHole = span.size;
+            }
+        }
+    } else if (g_mode == Mode::Paged || g_mode == Mode::Framed) {
+        // Count free-page runs as holes; skip the trivial all-free case.
+        if (used > 0) {
+            int runStart = -1;
+            for (int i = 0; i <= NUM_PAGES; i++) {
+                bool free_page = (i < NUM_PAGES) && !g_pageTable[i].present;
+                if (free_page && runStart < 0) { runStart = i; }
+                else if (!free_page && runStart >= 0) {
+                    holeCount++;
+                    size_t runSize = (size_t)(i - runStart) * PAGE_SIZE;
+                    if (runSize > largestHole) largestHole = runSize;
+                    runStart = -1;
+                }
+            }
+        }
+        // Internal waste: each block rounds up to whole pages
+        for (const auto& b : g_blocks) {
+            if (!b.used) continue;
+            size_t pages   = (alignUp(b.size, PAGE_SIZE)) / PAGE_SIZE;
+            size_t rounded = pages * PAGE_SIZE;
+            if (rounded > b.size) internalWaste += rounded - b.size;
+        }
+    } else if (g_mode == Mode::Segmented) {
+        // Each segment slot is either occupied or free
+        size_t partSize = SANDBOX_SIZE / NUM_SEGS;
+        for (int i = 0; i < NUM_SEGS; i++) {
+            if (!g_segTable[i].active) {
+                holeCount++;
+                if (partSize > largestHole) largestHole = partSize;
+            } else {
+                // Internal waste within occupied segment
+                if (g_segTable[i].limit < partSize)
+                    internalWaste += partSize - g_segTable[i].limit;
+            }
+        }
+    }
+
     std::cout << "ARENA " << SANDBOX_SIZE << " " << used << " "
-              << free_ << " " << g_blocks.size() << " " << modeName() << "\n";
+              << free_ << " " << g_blocks.size() << " " << modeName()
+              << " " << largestHole << " " << holeCount << " " << internalWaste << "\n";
 }
 
 static void printPageTable() {

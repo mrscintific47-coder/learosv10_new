@@ -575,8 +575,37 @@ DSTinyVM::NodePtr DSTinyVM::parseIf() {
     expect(TK::RParen, ")");
     n->children.push_back(parseStmt()); // [1] then
     if (cur().kind == TK::Else) {
-        consume();
-        n->children.push_back(parseStmt()); // [2] else
+        Token elseTok = consume();
+        if (elseTok.val == "elif" || cur().kind == TK::LParen) {
+            // elif(cond) body  →  treat as  else { if (cond) body }
+            // Re-parse as a nested If node so the condition is evaluated.
+            auto inner = std::make_shared<Node>(NK::If);
+            expect(TK::LParen, "(");
+            inner->children.push_back(parseExpr()); // condition
+            expect(TK::RParen, ")");
+            inner->children.push_back(parseStmt()); // then-body
+            // optional else / elif chained from this inner if
+            if (cur().kind == TK::Else) {
+                Token innerElse = consume();
+                if (innerElse.val == "elif" || cur().kind == TK::LParen) {
+                    auto inner2 = std::make_shared<Node>(NK::If);
+                    expect(TK::LParen, "(");
+                    inner2->children.push_back(parseExpr());
+                    expect(TK::RParen, ")");
+                    inner2->children.push_back(parseStmt());
+                    if (cur().kind == TK::Else) {
+                        consume();
+                        inner2->children.push_back(parseStmt());
+                    }
+                    inner->children.push_back(inner2);
+                } else {
+                    inner->children.push_back(parseStmt());
+                }
+            }
+            n->children.push_back(inner);
+        } else {
+            n->children.push_back(parseStmt()); // [2] plain else
+        }
     }
     return n;
 }
@@ -754,6 +783,12 @@ DSTinyVM::NodePtr DSTinyVM::parsePrimary() {
             expect(TK::RParen, ")");
             return n;
         }
+        case TK::Not:
+        case TK::Minus:
+            // Unary operators are valid inside parenthesised expressions (e.g.
+            // call arguments, if/while conditions). Delegate to parseUnary() so
+            // that  log(not x)  and  if (not cond)  work correctly.
+            return parseUnary();
         default:
             throw std::runtime_error("unexpected token '" + cur().val.toStdString() + "'");
     }
@@ -888,7 +923,7 @@ DSTinyVM::Val DSTinyVM::evalNode(NodePtr n, Env& env) {
 
         case NK::Unary: {
             Val v = evalNode(n->children[0], env);
-            if (n->sval=="!")  return Val::boolean(!v.isTruthy());
+            if (n->sval=="!" || n->sval=="not") return Val::boolean(!v.isTruthy());
             if (n->sval=="-")  return Val::num(-v.d_num);
             return v;
         }
@@ -1159,7 +1194,7 @@ DataStructureLab::DataStructureLab(QWidget* parent) : QWidget(parent) {
     outerLayout->setSpacing(12);
 
     auto* title = new QLabel("🧩  Data Structure Lab");
-    title->setStyleSheet(QString("color: %1; font-size: 14px; font-weight: bold;")
+    title->setStyleSheet(QString("color: %1; font-size: 14px; font-weight: 700;")
                           .arg(Theme::TEXT_PRIMARY));
     outerLayout->addWidget(title);
 
@@ -1229,6 +1264,9 @@ DataStructureLab::DataStructureLab(QWidget* parent) : QWidget(parent) {
         "Loads the selected sandbox process's real /proc/pid/maps regions "
         "as string nodes into the current structure.");
 
+    for (auto* lbl : {new QLabel("Structure:"), keyLabel, valueLabel}) {
+        lbl->setStyleSheet(QString("color:%1; font-size:11px;").arg(Theme::TEXT_SECONDARY));
+    }
     controlsLayout->addWidget(new QLabel("Structure:"));
     controlsLayout->addWidget(structureBox);
     controlsLayout->addWidget(keyLabel);
@@ -1259,7 +1297,7 @@ DataStructureLab::DataStructureLab(QWidget* parent) : QWidget(parent) {
     // Script header row
     auto* scriptHeader = new QHBoxLayout();
     auto* scriptTitle = new QLabel("✏️  Custom Traversal Script (Python-style)");
-    scriptTitle->setStyleSheet(QString("color: %1; font-size: 12px; font-weight: bold;")
+    scriptTitle->setStyleSheet(QString("color: %1; font-size: 12px; font-weight: 700;")
                                 .arg(Theme::TEXT_PRIMARY));
     scriptHeader->addWidget(scriptTitle);
     scriptHeader->addStretch();

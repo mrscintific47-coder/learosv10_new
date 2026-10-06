@@ -59,13 +59,19 @@ private slots:
         QCOMPARE(vmRun("log(true || false)"),  QString("true"));
         QCOMPARE(vmRun("log(!true)"),          QString("false"));
         QCOMPARE(vmRun("log(!false)"),         QString("true"));
-        // Python 'and' / 'or' aliases
+        // Python 'and' / 'or' / 'not' aliases
         QCOMPARE(vmRun("log(True and False)"), QString("false"));
         QCOMPARE(vmRun("log(True or False)"),  QString("true"));
-        // Python 'not' alias — known pre-existing VM limitation: 'not' inside a
-        // log() argument is parsed as an identifier (not the unary operator) due
-        // to the call-argument parsing context. The canonical form '!' works.
-        // We document this by verifying '!' negation works in all positions:
+        // 'not' as standalone unary
+        QCOMPARE(vmRun("var x=false; var y=not x; log(y)"), QString("true"));
+        // 'not' inside a call argument
+        QCOMPARE(vmRun("log(not false)"),      QString("true"));
+        QCOMPARE(vmRun("log(not true)"),       QString("false"));
+        // 'not' in a while condition
+        QCOMPARE(vmRun("var x=false; while(not x){ log(1); x=true; }"), QString("1"));
+        // 'not' in an if condition
+        QCOMPARE(vmRun("if(not false){ log(\"yes\") }"), QString("yes"));
+        // '!' still works everywhere
         QCOMPARE(vmRun("var x=false; log(!x)"), QString("true"));
     }
 
@@ -73,6 +79,14 @@ private slots:
         QCOMPARE(vmRun(R"(if (1 < 2) { log("yes") } else { log("no") })"), QString("yes"));
         QCOMPARE(vmRun(R"(if (2 < 1) { log("yes") } else { log("no") })"), QString("no"));
         QVERIFY(vmRun("if (false) { log(\"x\") }").isEmpty());
+        // elif chains — condition must be evaluated, not treated as unconditional else
+        QCOMPARE(vmRun("var x=2; if(x==1){log(\"one\")} elif(x==2){log(\"two\")} else{log(\"other\")}"),
+                 QString("two"));
+        QCOMPARE(vmRun("var x=3; if(x==1){log(\"one\")} elif(x==2){log(\"two\")} else{log(\"other\")}"),
+                 QString("other"));
+        // elif with no trailing else
+        QCOMPARE(vmRun("var x=2; if(x==1){log(\"a\")} elif(x==2){log(\"b\")}"), QString("b"));
+        QVERIFY(vmRun("var x=9; if(x==1){log(\"a\")} elif(x==2){log(\"b\")}").isEmpty());
     }
 
     void whileLoop() {

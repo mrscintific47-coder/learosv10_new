@@ -74,8 +74,8 @@ void HeatMap::paintEvent(QPaintEvent*) {
 
         // Section title
         p.setPen(QColor(titleColor));
-        p.setFont(QFont("Segoe UI", 8, QFont::Bold));
-        p.drawText(r.x()+10, r.y()+15, title);
+        p.setFont(QFont("Segoe UI", 9, QFont::Bold));
+        p.drawText(r.x()+10, r.y()+16, title);
     };
 
     // ── CPU CORES ──
@@ -182,9 +182,9 @@ void HeatMap::paintEvent(QPaintEvent*) {
             p.fillPath(sp, color);
         }
 
-        // Legend
-        int lx=procSectionRect.x()+6, ly=procSectionRect.bottom()-14;
-        p.setFont(QFont("Segoe UI",7));
+        // Legend — fixed offset from section bottom so it never overlaps content
+        int lx=procSectionRect.x()+6, ly=procSectionRect.bottom()-16;
+        p.setFont(QFont("Segoe UI",8));
         auto legend=[&](QColor c, QString label) {
             QPainterPath lp; lp.addRoundedRect(lx,ly,8,8,2,2);
             p.fillPath(lp,c);

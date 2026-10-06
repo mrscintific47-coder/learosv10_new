@@ -1,5 +1,6 @@
 #include "TimeScrubber.h"
 #include "Theme.h"
+#include <QPushButton>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QDateTime>
@@ -29,6 +30,7 @@ TimeScrubber::TimeScrubber(QWidget* parent) : QWidget(parent) {
     slider->setRange(0, 0);
     slider->setValue(0);
     slider->setToolTip("Drag to replay allocation history");
+    slider->setStyleSheet(Theme::slider());
 
     stepFwdBtn = new QPushButton("▶");
     stepFwdBtn->setFixedSize(26, 22);
@@ -38,13 +40,9 @@ TimeScrubber::TimeScrubber(QWidget* parent) : QWidget(parent) {
     playPauseBtn->setFixedWidth(70);
     playPauseBtn->setToolTip("Pause/resume live updates");
 
-    for (auto* btn : {stepBackBtn, stepFwdBtn, playPauseBtn}) {
-        btn->setStyleSheet(QString(
-            "QPushButton { background:%1; color:%2; border:1px solid %3; "
-            "border-radius:4px; font-size:10px; }"
-            "QPushButton:hover { background:%3; }"
-        ).arg(Theme::BG_INPUT, Theme::TEXT_PRIMARY, Theme::BORDER));
-    }
+    stepBackBtn->setStyleSheet(Theme::btnGhost());
+    stepFwdBtn->setStyleSheet(Theme::btnGhost());
+    playPauseBtn->setStyleSheet(Theme::btnPrimary());
 
     row->addWidget(stepBackBtn);
     row->addWidget(slider, 1);

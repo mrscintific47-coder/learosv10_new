@@ -6,7 +6,7 @@ Explainer::Explainer(QWidget* parent) : QWidget(parent) {
         "background: #FAFBFF;"
         "border-left: 1px solid %1;"
     ).arg(Theme::BORDER));
-    setFixedWidth(330);
+    setFixedWidth(360);
 
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -84,7 +84,7 @@ Explainer::Explainer(QWidget* parent) : QWidget(parent) {
     auto* footerLayout = new QHBoxLayout(footer);
     footerLayout->setContentsMargins(16, 0, 16, 0);
     auto* footerHint = new QLabel("Click anything to update this panel");
-    footerHint->setStyleSheet("color: #94A3B8; font-size: 10px;");
+    footerHint->setStyleSheet("color: #64748B; font-size: 10px;");
     footerLayout->addWidget(footerHint);
     layout->addWidget(footer);
 

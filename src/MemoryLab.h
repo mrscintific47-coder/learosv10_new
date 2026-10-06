@@ -11,7 +11,9 @@
 #include <QTimer>
 #include <QTabWidget>
 #include <QTableWidget>
+#include <QVector>
 #include <vector>
+#include <functional>
 #include "MemoryLabDriver.h"
 #include "MemoryTableWidget.h"
 #include "TimeScrubber.h"
@@ -96,6 +98,54 @@ private:
     QTableWidget* table;
 };
 
+// ── ChallengePanel ────────────────────────────────────────────────────────────
+// Displays a small guided challenge card that tells the student what to do next.
+class ChallengePanel : public QWidget {
+    Q_OBJECT
+public:
+    explicit ChallengePanel(QWidget* parent = nullptr);
+
+    // Feed live arena stats so the panel can detect completed challenges.
+    void onArenaUpdated(const ArenaSummary& s, int blockCount, bool hasContiguous,
+                        bool hasPaged, bool hasSegmented);
+
+signals:
+    void challengeExplanationNeeded(QString html);  // forward to Explainer
+
+private:
+    QLabel* titleLabel;
+    QLabel* descLabel;
+    QLabel* hintLabel;
+    QLabel* progressLabel;
+
+    struct Challenge {
+        QString title;
+        QString desc;
+        QString hint;
+        QString successExplanation;
+        std::function<bool(const ArenaSummary&, int, bool, bool, bool)> check;
+    };
+    QVector<Challenge> challenges;
+    int  currentIdx     = 0;
+    bool lastCompleted  = false;
+
+    void advance();
+    void refreshDisplay();
+};
+
+// ── FragBar ───────────────────────────────────────────────────────────────────
+// A compact visual bar showing used / free / waste proportions.
+class FragBar : public QWidget {
+    Q_OBJECT
+public:
+    explicit FragBar(QWidget* parent = nullptr);
+    void update(const ArenaSummary& s);
+protected:
+    void paintEvent(QPaintEvent*) override;
+private:
+    ArenaSummary summary;
+};
+
 // ── MemoryLab ─────────────────────────────────────────────────────────────────
 class MemoryLab : public QWidget {
     Q_OBJECT
@@ -148,6 +198,10 @@ private:
     QLabel*       statusLabel;
     QLabel*       inspectLabel;    // shows details of clicked block
 
+    // Fragmentation bar + challenge panel
+    FragBar*            fragBar;
+    ChallengePanel*     challengePanel;
+
     // Table panel (right side, page/seg/frame)
     TablePanel*         tablePanel;
 
@@ -159,7 +213,11 @@ private:
     long          sandboxSize = 4 * 1024 * 1024;
     QString       currentMode = "contiguous";
 
-    void updateInspect(const ArenaBlock* b);
+    // Track which modes have been visited (for challenge detection)
+    bool          visitedPaged     = false;
+    bool          visitedSegmented = false;
+
+    void updateInspect(const ArenaBlock* b, const ArenaSummary* s = nullptr);
     void refreshTableForMode();
     void emitExplanation(const QString& mode);
 };
